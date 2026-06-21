@@ -1,0 +1,41 @@
+spring:
+  application:
+    name: pr-security-guard
+
+  datasource:
+    url: ${DATABASE_URL:jdbc:postgresql://localhost:5432/security_guard}
+    username: ${DB_USER:postgres}
+    password: ${DB_PASSWORD:postgres}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+server:
+  port: 8080
+
+# Security Guard Configuration
+security-guard:
+  github:
+    webhook-secret: ${GITHUB_WEBHOOK_SECRET}
+    token: ${GITHUB_TOKEN}
+    api-base: https://api.github.com
+
+  agent:
+    service-url: ${AGENT_SERVICE_URL:http://localhost:8000}
+    timeout-seconds: 120
+
+  thresholds:
+    block-merge-confidence: ${CONFIDENCE_THRESHOLD:0.85}
+    warn-confidence: 0.60
+
+logging:
+  level:
+    com.security.guard: DEBUG
+    org.springframework.security: WARN

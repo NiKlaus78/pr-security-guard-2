@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>PR Security Guard — Live Dashboard</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, sans-serif; background: #0A0A0F; color: #E8E8F0; padding: 2rem; }
+  .wrap { max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 1.4rem; margin-bottom: 1.5rem; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-bottom: 1.5rem; }
+  .metric { background: #16161F; border: 1px solid #242430; border-radius: 8px; padding: 1rem; }
+  .metric-label { font-size: 12px; color: #7070A0; margin-bottom: 4px; }
+  .metric-value { font-size: 24px; font-weight: 600; }
+  .red { color: #FF3B5C; } .green { color: #00E5A0; } .blue { color: #4D9EFF; }
+  .findings { display: flex; flex-direction: column; gap: 8px; margin-bottom: 1.5rem; }
+  .finding { background: #16161F; border: 1px solid #242430; border-radius: 6px; padding: 0.85rem 1rem; display: grid; grid-template-columns: auto 1fr auto auto; gap: 12px; align-items: center; }
+  .sev { font-size: 10px; font-weight: 600; padding: 3px 8px; border-radius: 4px; }
+  .sev-CRITICAL { background: #2A1018; color: #FF3B5C; }
+  .sev-HIGH { background: #1E1508; color: #FFB347; }
+  .sev-MEDIUM { background: #081528; color: #4D9EFF; }
+  .ftype { font-size: 13px; font-weight: 500; }
+  .ffile { font-size: 11px; color: #7070A0; font-family: monospace; }
+  .gate { font-size: 10px; padding: 3px 10px; border-radius: 20px; font-weight: 600; }
+  .gate-BLOCK { background: #2A1018; color: #FF3B5C; }
+  .gate-WARN { background: #1E1508; color: #FFB347; }
+  .gate-DISCARD { background: #1a1a24; color: #7070A0; }
+  .banner { border-radius: 8px; padding: 1rem 1.25rem; margin-bottom: 1.5rem; border: 1px solid; }
+  .banner.block { background: #2A1018; border-color: #FF3B5C; }
+  .banner.allow { background: #001A12; border-color: #00E5A0; }
+  button { background: #FF3B5C; color: white; border: none; padding: 0.6rem 1.2rem; border-radius: 5px; cursor: pointer; font-weight: 600; margin-bottom: 1.5rem; }
+  button:hover { background: #ff1f44; }
+  .empty { color: #7070A0; text-align: center; padding: 2rem; }
+  .api-url { font-size: 11px; color: #404060; margin-bottom: 1rem; font-family: monospace; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>🔐 PR Security Guard — Live Dashboard</h1>
+  <div class="api-url" id="api-url-display"></div>
+  <button onclick="loadData()">↻ Refresh</button>
+
+  <div id="content">
+    <div class="empty">Loading...</div>
+  </div>
+</div>
+
+<script>
+// Change this if your webhook service runs on a different host/port
+const API_URL = 'http://localhost:8080/api/findings/dashboard';
+document.getElementById('api-url-display').textContent = 'Polling: ' + API_URL;
+
+async function loadData() {
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="empty">Loading...</div>';
+
+  try {
+    const res = await fetch(API_URL);
+    const data = await res.json();
+
+    if (data.status === 'no_scans_yet') {
+      content.innerHTML = '<div class="empty">No scans yet. Open a PR with a hardcoded secret to trigger one.</div>';
+      return;
+    }
+
+    const isBlocked = data.gate_decision === 'BLOCK';
+
+    let html = `
+      <div class="metrics">
+        <div class="metric"><div class="metric-label">PR</div><div class="metric-value blue">#${data.pr_number}</div></div>
+        <div class="metric"><div class="metric-label">Total findings</div><div class="metric-value">${data.stats.total}</div></div>
+        <div class="metric"><div class="metric-label">Blocked</div><div class="metric-value red">${data.stats.blocked}</div></div>
+        <div class="metric"><div class="metric-label">False positives removed</div><div class="metric-value green">${data.stats.false_positives}</div></div>
+      </div>
+
+      <div class="banner ${isBlocked ? 'block' : 'allow'}">
+        <strong>${isBlocked ? '❌ Merge blocked' : '✅ Merge allowed'}</strong> — ${data.repo} PR #${data.pr_number}
+        <div style="font-size: 12px; color: #7070A0; margin-top: 4px;">Scanned at ${new Date(data.scanned_at).toLocaleString()}</div>
+      </div>
+
+      <div class="findings">`;
+
+    data.findings.forEach(f => {
+      const conf = Math.round((f.finalConfidence || 0) * 100);
+      html += `
+        <div class="finding">
+          <span class="sev sev-${f.severity}">${f.severity}</span>
+          <div>
+            <div class="ftype">${f.type || 'Unknown'}</div>
+            <div class="ffile">${f.file || ''}:${f.line || ''} — ${conf}% confidence</div>
+          </div>
+          <span style="font-size: 11px; color: #7070A0;">${f.critiqueVerdict || ''}</span>
+          <span class="gate gate-${f.gateAction}">${f.gateAction}</span>
+        </div>`;
+    });
+
+    html += '</div>';
+    content.innerHTML = html;
+
+  } catch (err) {
+    content.innerHTML = '<div class="empty">⚠️ Could not reach API. Is the webhook service running on localhost:8080?</div>';
+    console.error(err);
+  }
+}
+
+loadData();
+setInterval(loadData, 10000); // auto-refresh every 10s
+</script>
+</body>
+</html>

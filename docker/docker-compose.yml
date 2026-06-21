@@ -1,0 +1,86 @@
+version: "3.9"
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: security-guard-db
+    environment:
+      POSTGRES_DB: security_guard
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-postgres}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - guard-net
+
+  # ── Python LangGraph Agent ─────────────────────────────────────────────────
+  agent:
+    build:
+      context: ../agent
+      dockerfile: ../docker/Dockerfile.agent
+    container_name: security-guard-agent
+    environment:
+      MISTRAL_API_KEY: ${MISTRAL_API_KEY}
+      LANGCHAIN_API_KEY: ${LANGSMITH_API_KEY}
+      LANGCHAIN_TRACING_V2: "true"
+      LANGCHAIN_PROJECT: ${LANGSMITH_PROJECT:-pr-security-guard}
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.85}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - guard-net
+    volumes:
+      - ../policy:/app/policy:ro
+
+  # ── Spring Boot Webhook Service ────────────────────────────────────────────
+  webhook:
+    build:
+      context: ../webhook-service
+      dockerfile: ../docker/Dockerfile.webhook
+    container_name: security-guard-webhook
+    environment:
+      DATABASE_URL: jdbc:postgresql://postgres:5432/security_guard
+      DB_USER: postgres
+      DB_PASSWORD: ${DB_PASSWORD:-postgres}
+      GITHUB_TOKEN: ${GITHUB_TOKEN}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET}
+      AGENT_SERVICE_URL: http://agent:8000
+      CONFIDENCE_THRESHOLD: ${CONFIDENCE_THRESHOLD:-0.85}
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      agent:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/webhook/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    networks:
+      - guard-net
+
+networks:
+  guard-net:
+    driver: bridge
+
+volumes:
+  postgres_data:

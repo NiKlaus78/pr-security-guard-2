@@ -1,0 +1,124 @@
+# PR Security Guard — Company Security Policy
+# Loaded by the agent to provide rule context to the LLM.
+# Edit this file to customize rules for your organization.
+
+version: "1.0"
+organization: "Lloyds Banking Group"
+last_updated: "2024-01-01"
+
+# ── Confidence Thresholds ──────────────────────────────────────────────────────
+thresholds:
+  block_merge: 0.85       # Findings above this confidence block the merge
+  warn_only: 0.60         # Findings above this confidence trigger a warning
+  discard_below: 0.60     # Findings below this are silently discarded
+
+# ── Severity Escalation ────────────────────────────────────────────────────────
+gate_rules:
+  # CRITICAL findings always block if confidence >= block_merge
+  CRITICAL: BLOCK
+  # HIGH findings block if confidence >= block_merge, warn if >= warn_only
+  HIGH: BLOCK
+  # MEDIUM findings warn only, never block
+  MEDIUM: WARN
+  # LOW findings are informational only
+  LOW: DISCARD
+
+# ── Secret Patterns ────────────────────────────────────────────────────────────
+# These are used by the regex pre-filter.
+# Add organization-specific patterns here.
+secret_patterns:
+  - id: SEC-001-01
+    name: "AWS Access Key"
+    pattern: "AKIA[0-9A-Z]{16}"
+    severity: CRITICAL
+
+  - id: SEC-001-02
+    name: "OpenAI API Key"
+    pattern: "sk-[a-zA-Z0-9]{32,}"
+    severity: CRITICAL
+
+  - id: SEC-001-03
+    name: "GitHub Personal Access Token"
+    pattern: "ghp_[A-Za-z0-9]{36}"
+    severity: CRITICAL
+
+  - id: SEC-001-04
+    name: "Private Key Header"
+    pattern: "-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----"
+    severity: CRITICAL
+
+  - id: SEC-001-05
+    name: "Hardcoded Password Assignment"
+    pattern: '(?i)(password|passwd|pwd)\s*[=:]\s*["\'][^"\']{6,}["\']'
+    severity: CRITICAL
+
+  - id: SEC-001-06
+    name: "JDBC URL with credentials"
+    pattern: "jdbc:[a-z]+://[^:]+:[^@]+@"
+    severity: CRITICAL
+
+# ── Allowed Exemptions ────────────────────────────────────────────────────────
+# Patterns that indicate a value is safe (env var reference, placeholder, etc.)
+exemptions:
+  env_var_patterns:
+    - "${\\w+}"                      # Spring @Value pattern
+    - "\\$\\{[A-Z_]+\\}"            # Shell/YAML variable
+    - "process\\.env\\.[A-Z_]+"     # Node.js env
+    - "System\\.getenv\\("          # Java System.getenv
+    - "os\\.environ"                 # Python os.environ
+    - "@Value\\(\"\\$\\{"           # Spring @Value annotation
+
+  placeholder_strings:
+    - "your-api-key-here"
+    - "changeme"
+    - "placeholder"
+    - "example"
+    - "replace-me"
+    - "todo"
+    - "xxxx"
+    - "1234567890"
+    - "test-secret"
+    - "dummy"
+
+# ── File Exclusions ──────────────────────────────────────────────────────────
+# Files matching these patterns get automatic confidence reduction (not exclusion).
+# Test files are still scanned but with lower default confidence.
+reduced_confidence_paths:
+  - "**/test/**"
+  - "**/*Test.java"
+  - "**/*Spec.java"
+  - "**/__tests__/**"
+  - "**/*.test.ts"
+  - "**/*.spec.ts"
+  - "**/mock*"
+  - "**/fixture*"
+  - "**/stub*"
+  - "README*"
+  - "CHANGELOG*"
+  - "docs/**"
+
+# ── CVE Severity Gate ─────────────────────────────────────────────────────────
+dependencies:
+  min_cvss_to_flag: 7.0      # Only flag CVEs with CVSS >= 7.0
+  check_apis:
+    - osv                     # https://osv.dev/
+    - nvd                     # https://nvd.nist.gov/
+
+# ── Compliance Frameworks ────────────────────────────────────────────────────
+compliance:
+  frameworks:
+    - name: PCI-DSS
+      version: "4.0"
+      relevant_requirements:
+        - "3.4: Do not store sensitive authentication data after authorization"
+        - "6.2: Develop bespoke and custom software securely"
+        - "6.3: Security vulnerabilities are identified and addressed"
+
+    - name: FCA
+      relevant_guidance:
+        - "SYSC 13: Operational risk — systems and controls"
+
+    - name: GDPR
+      relevant_articles:
+        - "Article 25: Data protection by design and by default"
+        - "Article 32: Security of processing"
