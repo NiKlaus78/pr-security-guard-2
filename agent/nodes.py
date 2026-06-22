@@ -33,8 +33,8 @@ WARN_THRESHOLD = 0.60
 # LLM setup — Mistral Codestral, code-specialist model
 llm = ChatMistralAI(
     model="codestral-latest",
-    max_tokens=8192,
-    temperature=0,           # Deterministic for security analysis
+    max_tokens=8192,          # Increased — large diffs need more output tokens
+    temperature=0,            # Deterministic for security analysis
     api_key=os.getenv("MISTRAL_API_KEY")
 )
 
@@ -164,14 +164,12 @@ def llm_analyzer_node(state: dict) -> dict:
     except json.JSONDecodeError as e:
         log.error(f"[{state['scan_id']}] JSON parse failed: {e}\nRaw: {raw_text[:500]}")
         # Full fallback — convert all regex hits to findings
-        return {"raw_findings": _prefilter_to_findings(state.get("prefilter_hits", []))}
+        return {"raw_findings": _prefilter_to_findings(state["prefilter_hits"])}
 
     except Exception as e:
         log.error(f"[{state['scan_id']}] LLM analyzer failed: {e}")
-        return {
-            "raw_findings": _prefilter_to_findings(state.get("prefilter_hits", [])),
-            "errors": state.get("errors", []) + [str(e)]
-        }
+        return {"raw_findings": _prefilter_to_findings(state.get("prefilter_hits", [])),
+                "errors": state.get("errors", []) + [str(e)]}
 
 
 # ── Node 3: Self-Reflection Critique ──────────────────────────────────────────
@@ -305,6 +303,7 @@ def gate_decision_node(state: dict) -> dict:
     }
 
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list:
     """
@@ -341,14 +340,13 @@ def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list
                 "file": "unknown",
                 "line": diff_line,
                 "evidence": hit["line_content"][:200],
-                "confidence": 0.88,
+                "confidence": 0.88,   # High confidence — regex pattern confirmed
                 "policy_ref": "SEC-001",
                 "remediation": "Move to environment variables or a secrets manager (e.g. AWS Secrets Manager, Vault)."
             })
 
     return merged
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _prefilter_to_findings(hits: list) -> list:
     """Convert regex prefilter hits to finding format as fallback."""
