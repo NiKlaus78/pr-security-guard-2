@@ -33,7 +33,7 @@ WARN_THRESHOLD = 0.60
 # LLM setup — Mistral Codestral, code-specialist model
 llm = ChatMistralAI(
     model="codestral-latest",
-    max_tokens=4096,
+    max_tokens=8192,
     temperature=0,           # Deterministic for security analysis
     api_key=os.getenv("MISTRAL_API_KEY")
 )
@@ -126,10 +126,18 @@ def llm_analyzer_node(state: dict) -> dict:
         response = llm.invoke(messages)
         raw_text = response.content
 
-        # Parse JSON response — strip any markdown fences if model added them
+        # Strip markdown fences — Codestral sometimes wraps output in ```json
         clean_json = raw_text.strip()
         if clean_json.startswith("```"):
             clean_json = re.sub(r"```(?:json)?\n?", "", clean_json).strip()
+        if clean_json.endswith("```"):
+            clean_json = clean_json[:-3].strip()
+
+        # Handle case where model prepends prose before the array
+        bracket_start = clean_json.find("[")
+        if bracket_start > 0:
+            log.warning(f"[{state['scan_id']}] Stripping prose before JSON array")
+            clean_json = clean_json[bracket_start:]
 
         findings = json.loads(clean_json)
 
@@ -138,16 +146,32 @@ def llm_analyzer_node(state: dict) -> dict:
             findings = findings.get("findings", [findings])
 
         log.info(f"[{state['scan_id']}] LLM raw findings: {len(findings)}")
+
+        # ── Regex-merge safety net ────────────────────────────────────────────
+        # If Mistral returned fewer findings than regex hits, it under-reported.
+        # Promote any regex hits that don't already have a matching LLM finding.
+        prefilter_hits = state.get("prefilter_hits", [])
+        if len(findings) < len(prefilter_hits):
+            log.warning(
+                f"[{state['scan_id']}] Mistral returned {len(findings)} findings "
+                f"but regex found {len(prefilter_hits)} hits — merging missing ones"
+            )
+            findings = _merge_regex_into_findings(findings, prefilter_hits)
+            log.info(f"[{state['scan_id']}] After merge: {len(findings)} findings")
+
         return {"raw_findings": findings}
 
     except json.JSONDecodeError as e:
         log.error(f"[{state['scan_id']}] JSON parse failed: {e}\nRaw: {raw_text[:500]}")
-        # Fall back to prefilter hits only, converted to finding format
-        return {"raw_findings": _prefilter_to_findings(state["prefilter_hits"])}
+        # Full fallback — convert all regex hits to findings
+        return {"raw_findings": _prefilter_to_findings(state.get("prefilter_hits", []))}
 
     except Exception as e:
         log.error(f"[{state['scan_id']}] LLM analyzer failed: {e}")
-        return {"raw_findings": [], "errors": state.get("errors", []) + [str(e)]}
+        return {
+            "raw_findings": _prefilter_to_findings(state.get("prefilter_hits", [])),
+            "errors": state.get("errors", []) + [str(e)]
+        }
 
 
 # ── Node 3: Self-Reflection Critique ──────────────────────────────────────────
@@ -280,6 +304,49 @@ def gate_decision_node(state: dict) -> dict:
         "gate_decision": gate_decision
     }
 
+
+
+def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list:
+    """
+    Merges regex prefilter hits into LLM findings.
+    Only adds hits that aren't already represented in LLM findings
+    (matched by line number or evidence content similarity).
+    Ensures we never lose a confirmed regex detection due to LLM under-reporting.
+    """
+    merged = list(llm_findings)
+
+    # Build a set of evidence strings already in LLM findings (lowercased for fuzzy match)
+    existing_evidence = {
+        f.get("evidence", "").lower()[:80]
+        for f in llm_findings
+    }
+    existing_lines = {f.get("line", -1) for f in llm_findings}
+
+    for i, hit in enumerate(prefilter_hits):
+        line_content_lower = hit["line_content"].lower()[:80]
+        diff_line = hit.get("diff_line", 0)
+
+        # Skip if already captured by LLM (same line or very similar evidence)
+        already_covered = (
+            diff_line in existing_lines or
+            any(line_content_lower in ev or ev in line_content_lower
+                for ev in existing_evidence if len(ev) > 10)
+        )
+
+        if not already_covered:
+            merged.append({
+                "finding_id": f"regex_{i:03d}",
+                "severity": hit["severity"],
+                "type": hit["type"],
+                "file": "unknown",
+                "line": diff_line,
+                "evidence": hit["line_content"][:200],
+                "confidence": 0.88,
+                "policy_ref": "SEC-001",
+                "remediation": "Move to environment variables or a secrets manager (e.g. AWS Secrets Manager, Vault)."
+            })
+
+    return merged
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
