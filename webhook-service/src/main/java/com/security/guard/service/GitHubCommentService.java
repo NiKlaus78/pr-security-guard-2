@@ -67,7 +67,9 @@ public class GitHubCommentService {
         try {
             webClient.post()
                     .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
+                    // Use 'token' scheme which is accepted for Personal Access Tokens and
+                    // is the traditional Authorization header value for GitHub API v3.
+                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(body)
@@ -106,7 +108,7 @@ public class GitHubCommentService {
         try {
             webClient.post()
                     .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
+                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(body)
@@ -174,7 +176,7 @@ public class GitHubCommentService {
         try {
             webClient.post()
                     .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
+                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(Map.of("body", body))
