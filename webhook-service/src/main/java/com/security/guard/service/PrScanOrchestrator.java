@@ -75,6 +75,16 @@ public class PrScanOrchestrator {
             }
 
             // ── Step 3: Build agent scan request ──────────────────────────
+            // Fetch full pom.xml content if it appears in the diff.
+            // This allows CVE scanning of ALL dependencies, not just new ones.
+            String pomXmlContent = "";
+            if (diffContent.contains("pom.xml")) {
+                log.info("pom.xml detected in diff — fetching full file for CVE scan | repo={} PR=#{}",
+                        repoFullName, prNumber);
+                pomXmlContent = diffExtractorService.fetchFileContent(
+                        repoFullName, "pom.xml", headSha);
+            }
+
             AgentScanRequest request = AgentScanRequest.builder()
                     .prNumber(prNumber)
                     .repoFullName(repoFullName)
@@ -83,6 +93,7 @@ public class PrScanOrchestrator {
                     .prAuthor(payload.getPullRequest().getUser().getLogin())
                     .prTitle(payload.getPullRequest().getTitle())
                     .diffContent(diffContent)
+                    .pomXmlContent(pomXmlContent)
                     .build();
 
             // ── Step 4: Call Python LangGraph agent ────────────────────────

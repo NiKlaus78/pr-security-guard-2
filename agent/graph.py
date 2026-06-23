@@ -32,6 +32,7 @@ class SecurityScanState(TypedDict):
     pr_author: str
     pr_title: str
     diff_content: str
+    pom_xml_content: str             # Full pom.xml content when present in PR
 
     # Pipeline outputs (accumulate through nodes)
     prefilter_hits: List[dict]       # Fast regex hits

@@ -23,7 +23,11 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from prompts.analyzer import ANALYZER_SYSTEM_PROMPT, build_analyzer_user_prompt
 from prompts.critique import CRITIQUE_SYSTEM_PROMPT, build_critique_user_prompt
-from tools.cve_checker import extract_dependencies_from_diff, check_dependencies_for_cves
+from tools.cve_checker import (
+    extract_dependencies_from_diff,
+    extract_dependencies_from_full_pom,
+    check_dependencies_for_cves
+)
 
 log = logging.getLogger(__name__)
 
@@ -106,8 +110,11 @@ def regex_prefilter_node(state: dict) -> dict:
 
 def cve_scanner_node(state: dict) -> dict:
     """
-    Scans pom.xml diff for added/changed Maven dependencies and queries
-    the OSV API (osv.dev) for known CVEs.
+    Scans pom.xml for Maven dependencies and queries OSV API for known CVEs.
+
+    Uses the FULL pom.xml content (not just the diff) so that pre-existing
+    vulnerable dependencies are also caught — not just newly added ones.
+    This is the key fix: the diff only shows what CHANGED, not what already existed.
 
     Runs AFTER regex prefilter but BEFORE LLM analyzer so that confirmed
     CVE findings are injected into the LLM prompt as hard facts.
@@ -116,21 +123,34 @@ def cve_scanner_node(state: dict) -> dict:
     log.info(f"[{state['scan_id']}] Node: cve_scanner")
 
     diff = state["diff_content"]
+    pom_xml_content = state.get("pom_xml_content", "")
 
     # Only run if pom.xml is in the diff
     if "pom.xml" not in diff:
         log.info(f"[{state['scan_id']}] No pom.xml in diff — skipping CVE scan")
         return {"cve_findings": []}
 
-    # Step 1: Extract added/changed Maven dependencies from the diff
-    dependencies = extract_dependencies_from_diff(diff)
+    # Prefer full pom.xml content over diff — catches ALL deps, not just new ones
+    if pom_xml_content:
+        log.info(
+            f"[{state['scan_id']}] Using full pom.xml content "
+            f"({len(pom_xml_content)} chars) — scanning ALL dependencies"
+        )
+        dependencies = extract_dependencies_from_full_pom(pom_xml_content)
+    else:
+        log.warning(
+            f"[{state['scan_id']}] Full pom.xml not available — "
+            f"falling back to diff-only (may miss pre-existing vulnerabilities)"
+        )
+        dependencies = extract_dependencies_from_diff(diff)
+
     if not dependencies:
-        log.info(f"[{state['scan_id']}] No new dependencies found in pom.xml diff")
+        log.info(f"[{state['scan_id']}] No dependencies found in pom.xml")
         return {"cve_findings": []}
 
     log.info(f"[{state['scan_id']}] Checking {len(dependencies)} dependencies against OSV...")
 
-    # Step 2: Query OSV batch API for all dependencies
+    # Query OSV batch API for all dependencies
     cve_findings = check_dependencies_for_cves(dependencies)
 
     log.info(

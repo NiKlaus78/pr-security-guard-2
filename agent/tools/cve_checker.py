@@ -31,6 +31,48 @@ ARTIFACT_RE = re.compile(r'<artifactId>([^<]+)</artifactId>')
 VERSION_RE  = re.compile(r'<version>([^<${}]+)</version>')
 
 
+def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
+    """
+    Extracts ALL Maven dependencies from full pom.xml content.
+
+    Unlike extract_dependencies_from_diff, this scans the entire file —
+    so pre-existing vulnerable dependencies are also caught, not just
+    ones added in this specific PR. This is the critical difference.
+    """
+    dependencies = []
+    dep_pattern = re.compile(
+        r'<dependency>(.*?)</dependency>',
+        re.DOTALL | re.IGNORECASE
+    )
+
+    for match in dep_pattern.finditer(pom_content):
+        block = match.group(1)
+
+        group_match    = GROUP_RE.search(block)
+        artifact_match = ARTIFACT_RE.search(block)
+        version_match  = VERSION_RE.search(block)
+
+        if group_match and artifact_match and version_match:
+            version = version_match.group(1).strip()
+
+            # Skip property references like ${spring.version} — can't resolve
+            if version.startswith('$'):
+                continue
+
+            # Calculate approximate line number from character offset
+            line_num = pom_content[:match.start()].count('\n') + 1
+
+            dependencies.append({
+                "group_id":    group_match.group(1).strip(),
+                "artifact_id": artifact_match.group(1).strip(),
+                "version":     version,
+                "line_number": line_num
+            })
+
+    log.info(f"Extracted {len(dependencies)} total dependencies from full pom.xml")
+    return dependencies
+
+
 def extract_dependencies_from_diff(diff_content: str) -> list[dict]:
     """
     Parses a unified diff to extract Maven dependency blocks that were ADDED.
