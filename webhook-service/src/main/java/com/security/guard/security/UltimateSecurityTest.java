@@ -28,6 +28,14 @@ public class UltimateSecurityTest {
         String query2 = "SELECT * FROM users WHERE name = '" + accountId + "'";
     }
 
+    // ── HIGH: Insecure Deserialization ────────────────────────────────────────
+    // Use a plain InputStream here to avoid a compile-time dependency on the
+    // servlet API (javax.servlet) inside this test file.
+    public Object deserialize(java.io.InputStream input) throws Exception {
+        ObjectInputStream ois = new ObjectInputStream(input);
+        return ois.readObject();
+    }
+
     // ── HIGH: Broken Auth — JWT not verified ──────────────────────────────────
     public void processToken(String token) {
         // Parsing without signature verification
