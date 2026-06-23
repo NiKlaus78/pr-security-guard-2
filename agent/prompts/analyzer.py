@@ -59,12 +59,14 @@ def build_analyzer_user_prompt(
     diff_content: str,
     prefilter_hits: list,
     pr_title: str,
-    pr_author: str
+    pr_author: str,
+    cve_findings: list = None
 ) -> str:
     """
     Builds the user prompt. For Mistral Codestral we make the
     pre-filter hints MANDATORY rather than optional — the model
     must address every single regex hit explicitly.
+    CVE findings are injected as confirmed facts from OSV database.
     """
 
     prefilter_section = ""
@@ -84,9 +86,24 @@ Also scan for any additional violations the regex may have missed.
 
 """
 
+    cve_section = ""
+    if cve_findings:
+        cve_lines = "\n".join(
+            f"  - {c['cve_id']} (CVSS {c.get('cvss_score', '?')}) in {c['evidence']} — {c['summary'][:120]}"
+            for c in cve_findings
+        )
+        cve_section = f"""
+CONFIRMED CVEs FROM OSV DATABASE (treat these as established facts, not guesses):
+The following {len(cve_findings)} CVEs were confirmed by querying osv.dev.
+You MUST include a finding object for each one in your JSON array.
+
+{cve_lines}
+
+"""
+
     return f"""PR: {pr_title} by {pr_author}
 
-{prefilter_section}Git diff (scan ONLY lines starting with +):
+{prefilter_section}{cve_section}Git diff (scan ONLY lines starting with +):
 
 {diff_content}
 

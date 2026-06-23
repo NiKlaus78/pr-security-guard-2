@@ -23,6 +23,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 
 from prompts.analyzer import ANALYZER_SYSTEM_PROMPT, build_analyzer_user_prompt
 from prompts.critique import CRITIQUE_SYSTEM_PROMPT, build_critique_user_prompt
+from tools.cve_checker import extract_dependencies_from_diff, check_dependencies_for_cves
 
 log = logging.getLogger(__name__)
 
@@ -101,18 +102,58 @@ def regex_prefilter_node(state: dict) -> dict:
     return {"prefilter_hits": hits}
 
 
-# ── Node 2: LLM Security Analyzer ─────────────────────────────────────────────
+# ── Node 2: CVE Scanner ────────────────────────────────────────────────────────
+
+def cve_scanner_node(state: dict) -> dict:
+    """
+    Scans pom.xml diff for added/changed Maven dependencies and queries
+    the OSV API (osv.dev) for known CVEs.
+
+    Runs AFTER regex prefilter but BEFORE LLM analyzer so that confirmed
+    CVE findings are injected into the LLM prompt as hard facts.
+    No LLM calls — purely deterministic database lookups.
+    """
+    log.info(f"[{state['scan_id']}] Node: cve_scanner")
+
+    diff = state["diff_content"]
+
+    # Only run if pom.xml is in the diff
+    if "pom.xml" not in diff:
+        log.info(f"[{state['scan_id']}] No pom.xml in diff — skipping CVE scan")
+        return {"cve_findings": []}
+
+    # Step 1: Extract added/changed Maven dependencies from the diff
+    dependencies = extract_dependencies_from_diff(diff)
+    if not dependencies:
+        log.info(f"[{state['scan_id']}] No new dependencies found in pom.xml diff")
+        return {"cve_findings": []}
+
+    log.info(f"[{state['scan_id']}] Checking {len(dependencies)} dependencies against OSV...")
+
+    # Step 2: Query OSV batch API for all dependencies
+    cve_findings = check_dependencies_for_cves(dependencies)
+
+    log.info(
+        f"[{state['scan_id']}] CVE scan complete | "
+        f"dependencies_checked={len(dependencies)} cves_found={len(cve_findings)}"
+    )
+
+    return {"cve_findings": cve_findings}
+
+
+# ── Node 3: LLM Security Analyzer ─────────────────────────────────────────────
 
 def llm_analyzer_node(state: dict) -> dict:
     """
-    Deep LLM semantic analysis using Claude Sonnet.
-    Receives the diff + prefilter hints → returns structured findings JSON.
+    Deep LLM semantic analysis using Mistral Codestral.
+    Receives diff + prefilter hints + confirmed CVEs → returns structured findings JSON.
     """
     log.info(f"[{state['scan_id']}] Node: llm_analyzer")
 
     user_prompt = build_analyzer_user_prompt(
         diff_content=state["diff_content"],
         prefilter_hits=state["prefilter_hits"],
+        cve_findings=state.get("cve_findings", []),
         pr_title=state["pr_title"],
         pr_author=state["pr_author"]
     )
@@ -149,7 +190,6 @@ def llm_analyzer_node(state: dict) -> dict:
 
         # ── Regex-merge safety net ────────────────────────────────────────────
         # If Mistral returned fewer findings than regex hits, it under-reported.
-        # Promote any regex hits that don't already have a matching LLM finding.
         prefilter_hits = state.get("prefilter_hits", [])
         if len(findings) < len(prefilter_hits):
             log.warning(
@@ -157,7 +197,15 @@ def llm_analyzer_node(state: dict) -> dict:
                 f"but regex found {len(prefilter_hits)} hits — merging missing ones"
             )
             findings = _merge_regex_into_findings(findings, prefilter_hits)
-            log.info(f"[{state['scan_id']}] After merge: {len(findings)} findings")
+            log.info(f"[{state['scan_id']}] After regex merge: {len(findings)} findings")
+
+        # ── CVE merge ────────────────────────────────────────────────────────
+        # Always inject confirmed OSV CVE findings — these are facts, not LLM guesses.
+        # The LLM may have already mentioned them, so we deduplicate by pom.xml line.
+        cve_findings = state.get("cve_findings", [])
+        if cve_findings:
+            findings = _merge_cve_into_findings(findings, cve_findings)
+            log.info(f"[{state['scan_id']}] After CVE merge: {len(findings)} findings")
 
         return {"raw_findings": findings}
 
@@ -304,6 +352,37 @@ def gate_decision_node(state: dict) -> dict:
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _merge_cve_into_findings(llm_findings: list, cve_findings: list) -> list:
+    """
+    Merges confirmed OSV CVE findings into the LLM findings list.
+    Deduplicates by checking if the LLM already mentioned the same
+    dependency (by artifact name or pom.xml line number).
+    CVE findings have 0.98 confidence — they are database facts, not guesses.
+    """
+    merged = list(llm_findings)
+
+    # Build set of already-covered pom.xml lines and artifact names
+    existing_lines = {f.get("line", -1) for f in llm_findings if f.get("file") == "pom.xml"}
+    existing_evidence_lower = {
+        f.get("evidence", "").lower() for f in llm_findings
+    }
+
+    for cve in cve_findings:
+        cve_line = cve.get("line", -1)
+        artifact = cve.get("cve_id", "").lower()
+
+        already_covered = (
+            cve_line in existing_lines or
+            any(artifact in ev for ev in existing_evidence_lower if ev)
+        )
+
+        if not already_covered:
+            log.info(f"Injecting CVE finding: {cve['cve_id']} CVSS={cve.get('cvss_score', '?')}")
+            merged.append(cve)
+
+    return merged
+
 
 def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list:
     """

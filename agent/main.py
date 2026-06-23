@@ -100,6 +100,8 @@ async def scan_pr(request: ScanRequest):
             "pr_author": request.pr_author,
             "pr_title": request.pr_title,
             "diff_content": request.diff_content,
+            "prefilter_hits": [],
+            "cve_findings": [],
             "raw_findings": [],
             "critiqued_findings": [],
             "final_findings": [],
