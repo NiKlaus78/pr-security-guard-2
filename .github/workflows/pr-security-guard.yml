@@ -1,11 +1,8 @@
 name: PR Security Guard
 
-# Triggers on pull request events
 on:
   pull_request:
     types: [opened, synchronize, reopened]
-    # Optionally restrict to specific branches:
-    # branches: [main, develop, release/**]
 
 permissions:
   contents: read
@@ -17,48 +14,42 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
 
-    # Don't block the workflow — the guard posts its own status via the API
-    # This job just triggers the webhook receiver
     steps:
-      - name: Notify Security Guard
-        run: |
-          echo "PR Security Guard triggered via GitHub webhook."
-          echo "The guard receives webhook events directly from GitHub."
-          echo "Check the PR for inline security comments and commit status."
-
-      # Optional: fail the CI job if the guard blocks the merge
-      # This gives a second layer of enforcement via GitHub Actions
       - name: Wait for Security Guard Status
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           echo "Waiting for security guard commit status..."
-          
+
           MAX_ATTEMPTS=20
           ATTEMPT=0
           SHA=${{ github.event.pull_request.head.sha }}
           REPO=${{ github.repository }}
-          
+
+          echo "Checking SHA: $SHA"
+          echo "Checking REPO: $REPO"
+
           while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
-            STATUS=$(gh api \
-              /repos/${REPO}/commits/${SHA}/statuses \
-              --jq '[.[] | select(.context == "pr-security-guard")] | first | .state' \
-              2>/dev/null || echo "pending")
-            
+            RAW=$(gh api /repos/${REPO}/commits/${SHA}/statuses)
+            echo "--- Raw API response (attempt $((ATTEMPT+1))) ---"
+            echo "$RAW"
+            echo "---------------------------------------------------"
+
+            STATUS=$(echo "$RAW" | jq -r '[.[] | select(.context == "pr-security-guard")] | first | .state // "pending"')
+
             echo "Attempt $((ATTEMPT+1))/${MAX_ATTEMPTS}: Status = ${STATUS}"
-            
+
             if [ "$STATUS" = "success" ]; then
               echo "✅ Security scan passed."
               exit 0
             elif [ "$STATUS" = "failure" ]; then
               echo "❌ Security scan BLOCKED this PR."
-              echo "Check PR comments for security findings."
               exit 1
             fi
-            
+
             ATTEMPT=$((ATTEMPT+1))
             sleep 15
           done
-          
-          echo "⚠️ Security scan timed out. Check guard service logs."
+
+          echo "⚠️ Security scan timed out."
           exit 1
