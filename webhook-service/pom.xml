@@ -39,7 +39,7 @@
             <scope>runtime</scope>
         </dependency>
 
-
+        <!-- CRITICAL: CVE-2021-44228 CVSS 10.0 — Log4Shell -->
         <dependency>
             <groupId>org.apache.logging.log4j</groupId>
             <artifactId>log4j-core</artifactId>
