@@ -18,7 +18,7 @@ log = logging.getLogger(__name__)
 
 OSV_BATCH_URL  = "https://api.osv.dev/v1/querybatch"
 OSV_VULN_URL   = "https://api.osv.dev/v1/vulns/{vuln_id}"
-MIN_CVSS_SCORE = 7.0
+MIN_CVSS_SCORE = 4.0          # Include MODERATE and above
 REQUEST_TIMEOUT = 15
 
 
@@ -257,25 +257,31 @@ def _build_finding(vuln: dict, dep: dict) -> dict | None:
             except (ValueError, TypeError):
                 pass
 
-    # Use severity string as final fallback
+    # ── Use database_specific.severity as the primary signal ─────────────────
+    # OSV CVSS v4 vectors do not embed numeric scores — severity label is
+    # the most reliable field for GitHub Advisory Database entries.
     severity_label = db_specific.get("severity", "").upper()
+
+    # Map severity label to numeric score if we still have 0.0
     if cvss_score == 0.0:
         cvss_map = {"CRITICAL": 9.5, "HIGH": 8.0, "MODERATE": 6.5, "MEDIUM": 6.5, "LOW": 3.5}
         cvss_score = cvss_map.get(severity_label, 0.0)
 
-    # ── Apply threshold — but always include CRITICAL/HIGH by label ───────────
-    is_high_severity = severity_label in ("CRITICAL", "HIGH")
-    if cvss_score < MIN_CVSS_SCORE and not is_high_severity:
-        log.debug(f"Skipping {cve_id} — CVSS {cvss_score} below threshold, severity={severity_label}")
+    # Skip only genuine LOW or completely unknown vulns
+    known_actionable = severity_label in ("CRITICAL", "HIGH", "MODERATE", "MEDIUM")
+    if cvss_score < MIN_CVSS_SCORE and not known_actionable:
+        log.debug(f"Skipping {cve_id} — CVSS {cvss_score} below threshold severity={severity_label}")
         return None
 
-    # ── Map to our severity levels ─────────────────────────────────────────────
+    # ── Map to our internal severity levels ───────────────────────────────────
     if cvss_score >= 9.0 or severity_label == "CRITICAL":
         severity = "CRITICAL"
     elif cvss_score >= 7.0 or severity_label == "HIGH":
         severity = "HIGH"
-    else:
+    elif severity_label in ("MODERATE", "MEDIUM") or cvss_score >= 4.0:
         severity = "MEDIUM"
+    else:
+        severity = "LOW"
 
     dep_coords = f"{dep['group_id']}:{dep['artifact_id']}:{dep['version']}"
 
