@@ -21,6 +21,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
+# Enable DEBUG for CVE checker so we can see exactly what OSV returns
+logging.getLogger("tools.cve_checker").setLevel(logging.DEBUG)
 log = logging.getLogger(__name__)
 
 
@@ -34,6 +36,7 @@ class ScanRequest(BaseModel):
     pr_author: str
     pr_title: str
     diff_content: str
+    pom_xml_content: str = ""    # Full pom.xml content when present in diff
 
 
 class ScanResponse(BaseModel):
@@ -101,7 +104,8 @@ async def scan_pr(request: ScanRequest):
             "pr_title": request.pr_title,
             "diff_content": request.diff_content,
             "prefilter_hits": [],
-            "dep_scan_findings": [],
+            "cve_findings": [],
+            "pom_xml_content": request.pom_xml_content,
             "raw_findings": [],
             "critiqued_findings": [],
             "final_findings": [],
