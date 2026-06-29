@@ -87,45 +87,17 @@ public class GitHubCommentService {
     // ── PR Review Comment (inline, attached to a specific line) ───────────
 
     public void postFindingComment(String repo, Long prNumber, String headSha, JsonNode finding) {
-        String file = finding.path("file").asText("");
-        int line = finding.path("line").asInt(0);
+        // Post directly to PR thread. GitHub inline comments only accept lines
+        // that appear in the diff's + context — which we cannot reliably determine
+        // from the LLM's output (it references file line numbers, not diff positions).
+        // PR thread comments always work and keep all findings in one place.
+        postIssueComment(repo, prNumber, formatFindingAsComment(finding));
 
-        if (file.isBlank() || line <= 0) {
-            // Fall back to PR thread comment if we don't have a valid line
-            postIssueComment(repo, prNumber, formatFindingAsComment(finding));
-            return;
-        }
-
-        String url = String.format("%s/repos/%s/pulls/%d/comments", githubApiBase, repo, prNumber);
-
-        Map<String, Object> body = new HashMap<>();
-        body.put("body", formatFindingAsComment(finding));
-        body.put("commit_id", headSha);
-        body.put("path", file);
-        body.put("line", line);
-        body.put("side", "RIGHT");
-
-        try {
-            webClient.post()
-                    .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
-                    .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(body)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .timeout(Duration.ofSeconds(10))
-                    .block();
-
-            log.debug("Posted inline comment | repo={} PR=#{} file={} line={}",
-                    repo, prNumber, file, line);
-        } catch (Exception e) {
-            // If inline comment fails (e.g. line not in diff), fall back to PR thread
-            log.warn("Inline comment failed, falling back to PR thread | {}", e.getMessage());
-            postIssueComment(repo, prNumber, formatFindingAsComment(finding));
-        }
+        log.debug("Posted finding to PR thread | repo={} PR=#{} type={} severity={}",
+                repo, prNumber,
+                finding.path("type").asText(),
+                finding.path("severity").asText());
     }
-
     // ── PR Thread Summary Comment ──────────────────────────────────────────
 
     public void postSummaryComment(String repo, Long prNumber, JsonNode findings, String decision) {

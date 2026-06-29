@@ -473,3 +473,6 @@ def _prefilter_to_findings(hits: list) -> list:
             "remediation": "Move to environment variables or secrets manager."
         })
     return findings
+
+# Alias for backward compatibility with graph.py
+dependency_scanner_node = cve_scanner_node

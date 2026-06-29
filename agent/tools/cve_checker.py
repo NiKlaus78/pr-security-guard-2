@@ -243,8 +243,60 @@ def check_dependencies_for_cves(dependencies: list[dict]) -> list[dict]:
         f"findings={len(cve_findings)} "
         f"failed={failed}"
     )
-    return cve_findings
+    # Group multiple CVEs for the same dependency into one finding
+    deduplicated = _deduplicate_by_dependency(cve_findings)
+    log.info(f"After deduplication: {len(deduplicated)} findings (was {len(cve_findings)})")
+    return deduplicated
 
+def _deduplicate_by_dependency(findings: list) -> list:
+    """
+    Groups all CVEs for the same dependency into a single finding.
+    Uses the most severe CVE as the headline, lists others in the evidence.
+
+    Without this, log4j 2.14.1 with 7 CVEs produces 7 identical-looking
+    findings — which is noisy and unhelpful. One finding per dep is cleaner.
+    """
+    if not findings:
+        return []
+
+    severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
+
+    # Group by the dependency coordinates (group:artifact:version)
+    groups: dict[str, list] = {}
+    for f in findings:
+        # evidence format: "group:artifact:version → CVE-xxx"
+        dep_key = f.get("evidence", "").split(" → ")[0].strip()
+        if not dep_key:
+            dep_key = f.get("finding_id", "unknown")
+        groups.setdefault(dep_key, []).append(f)
+
+    merged = []
+    for dep_key, dep_findings in groups.items():
+        # Sort by severity — most critical first
+        dep_findings.sort(key=lambda x: severity_order.get(x.get("severity", "LOW"), 9))
+        primary = dict(dep_findings[0])  # copy
+
+        if len(dep_findings) > 1:
+            other_cves = [f.get("cve_id", f.get("osv_id", "?")) for f in dep_findings[1:]]
+            shown = other_cves[:4]
+            extra = len(other_cves) - 4
+            extra_str = f" (+{extra} more)" if extra > 0 else ""
+            primary["evidence"] = (
+                f"{dep_key} → {primary.get('cve_id', primary.get('osv_id', '?'))} "
+                f"(+{len(other_cves)} more CVEs: {', '.join(shown)}{extra_str})"
+            )
+            primary["remediation"] = (
+                f"{primary['remediation']} "
+                f"This dependency has {len(dep_findings)} known CVEs total."
+            )
+            log.info(
+                f"Merged {len(dep_findings)} CVEs for {dep_key} → "
+                f"primary={primary.get('cve_id')} severity={primary.get('severity')}"
+            )
+
+        merged.append(primary)
+
+    return merged
 
 # ── Per-vuln fetch + build (runs inside thread pool) ─────────────────────────
 
