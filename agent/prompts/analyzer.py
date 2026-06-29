@@ -51,7 +51,7 @@ Rules:
 - ONLY flag lines starting with + (added lines). Never flag lines starting with -.
 - Each hardcoded secret on its own line = its own finding object with that line number.
 - Test files (path has: test, spec, mock, fixture) = confidence max 0.40.
-- Environment variable references like ${VAR} or System.getenv() = skip, not a violation.
+- Environment variable references like ${VAR}, System.getenv(), or variable names concatenated with prefixes (e.g. "Bearer " + token, "token " + githubToken) = skip, NOT a secret exposure (only literal hardcoded secrets are violations).
 - If absolutely nothing found, return exactly: []"""
 
 
