@@ -533,7 +533,7 @@ def _build_finding(vuln: dict, dep: dict) -> dict | None:
         "severity":    severity,
         "type":        "VULN_DEPENDENCY",
         "file":        pom_path,
-        "line":        0,       # 0 → routes to PR thread, avoids 422 inline failures
+        "line":        dep.get("line_number", 0),       # Use the actual line number of the dependency in pom.xml
         "evidence":    f"{dep_coords} → {cve_id}{version_note}",
         "confidence":  confidence,
         "policy_ref":  "SEC-005",
