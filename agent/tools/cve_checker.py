@@ -1,11 +1,14 @@
 """
-CVE Checker Tool — v3 (parallel fetch, robust severity, full debug logging)
+CVE Checker Tool — v4 (parent-managed deps, parallel fetch, robust severity)
 
 Two-step OSV lookup:
   Step 1: POST /v1/querybatch  → get vuln IDs per package
   Step 2: GET  /v1/vulns/{id}  → fetch full details in PARALLEL
 
 Key design decisions:
+  - Scans ALL dependencies — including parent-managed ones without <version> tags
+  - Resolves versions from <dependencyManagement> blocks and parent POM BOM
+  - Deps with unresolvable versions still queried via OSV (no version → all vulns)
   - Parallel vuln detail fetching (ThreadPoolExecutor) — avoids 7-14s sequential timeout
   - No fragile CVSS v4 vector parsing — use OSV severity label as primary signal
   - Include CRITICAL / HIGH / MODERATE, exclude LOW and unknown
@@ -42,7 +45,7 @@ SEVERITY_MAP = {
 
 GROUP_RE    = re.compile(r'<groupId>([^<]+)</groupId>')
 ARTIFACT_RE = re.compile(r'<artifactId>([^<]+)</artifactId>')
-VERSION_RE  = re.compile(r'<version>([^<${}]+)</version>')
+VERSION_RE  = re.compile(r'<version>([^<]+)</version>')
 DEP_BLOCK   = re.compile(r'<dependency>(.*?)</dependency>', re.DOTALL | re.IGNORECASE)
 PROPS_TAG   = re.compile(r'<([^/>\s][^>]*)>([^<]+)</\1>')
 
@@ -53,6 +56,9 @@ def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
     """
     Extracts ALL Maven dependencies from full pom.xml content.
     Resolves ${property} references using the <properties> block.
+    For parent-managed deps (no <version> tag), resolves version from
+    <dependencyManagement> or includes them without a version so OSV
+    can still return known vulnerabilities for the package.
     """
     # Step 1: Build property map for version resolution
     properties = {}
@@ -64,6 +70,19 @@ def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
             properties[m.group(1).strip()] = m.group(2).strip()
         log.debug(f"Resolved {len(properties)} pom properties")
 
+    # Step 2: Extract parent POM info for version resolution context
+    parent_info = _extract_parent_info(pom_content)
+    if parent_info:
+        log.info(
+            f"Parent POM: {parent_info['group_id']}:"
+            f"{parent_info['artifact_id']}:{parent_info['version']}"
+        )
+
+    # Step 3: Build a version map from <dependencyManagement> if present
+    managed_versions = _resolve_managed_versions(pom_content, properties)
+    if managed_versions:
+        log.info(f"Resolved {len(managed_versions)} managed dependency versions")
+
     dependencies = []
 
     for match in DEP_BLOCK.finditer(pom_content):
@@ -73,36 +92,61 @@ def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
         artifact_m = ARTIFACT_RE.search(block)
         version_m  = VERSION_RE.search(block)
 
-        if not (group_m and artifact_m and version_m):
+        if not (group_m and artifact_m):
             continue
 
-        raw_version = version_m.group(1).strip()
-
-        # Resolve ${property} reference
-        if raw_version.startswith('${') and raw_version.endswith('}'):
-            prop_key = raw_version[2:-1]
-            resolved = properties.get(prop_key, "")
-            if not resolved:
-                log.debug(f"Unresolvable property: {raw_version} — skipping")
-                continue
-            raw_version = resolved
-
-        # Skip anything still unresolved
-        if raw_version.startswith('$'):
-            continue
-
+        group_id = group_m.group(1).strip()
+        artifact_id = artifact_m.group(1).strip()
         line_num = pom_content[:match.start()].count('\n') + 1
+        version_source = "explicit"  # tracks where version came from
+
+        if version_m:
+            raw_version = version_m.group(1).strip()
+
+            # Resolve ${property} reference
+            if raw_version.startswith('${') and raw_version.endswith('}'):
+                prop_key = raw_version[2:-1]
+                resolved = properties.get(prop_key, "")
+                if not resolved:
+                    log.debug(f"Unresolvable property: {raw_version} for {group_id}:{artifact_id}")
+                    raw_version = ""
+                    version_source = "unresolved_property"
+                else:
+                    raw_version = resolved
+                    version_source = "property"
+
+            # Skip anything still looking like an unresolved reference
+            if raw_version.startswith('$'):
+                raw_version = ""
+                version_source = "unresolved_property"
+        else:
+            # No <version> tag — try to resolve from dependencyManagement or parent
+            raw_version = ""
+            version_source = "parent_managed"
+
+        # Try managed version resolution if we don't have a version yet
+        if not raw_version:
+            managed_key = f"{group_id}:{artifact_id}"
+            if managed_key in managed_versions:
+                raw_version = managed_versions[managed_key]
+                version_source = "dependency_management"
+                log.debug(f"Resolved {managed_key} → {raw_version} from dependencyManagement")
 
         dependencies.append({
-            "group_id":    group_m.group(1).strip(),
-            "artifact_id": artifact_m.group(1).strip(),
-            "version":     raw_version,
-            "line_number": line_num
+            "group_id":       group_id,
+            "artifact_id":    artifact_id,
+            "version":        raw_version,     # may be "" for parent-managed deps
+            "line_number":    line_num,
+            "version_source": version_source,   # helps set confidence level downstream
         })
 
     log.info(f"Extracted {len(dependencies)} dependencies from full pom.xml")
+    versioned = sum(1 for d in dependencies if d['version'])
+    unversioned = sum(1 for d in dependencies if not d['version'])
+    log.info(f"  versioned={versioned}, parent-managed (no version)={unversioned}")
     for d in dependencies:
-        log.debug(f"  dep: {d['group_id']}:{d['artifact_id']}:{d['version']}")
+        ver_display = d['version'] or f"(managed by parent — {d['version_source']})"
+        log.debug(f"  dep: {d['group_id']}:{d['artifact_id']}:{ver_display}")
 
     return dependencies
 
@@ -128,18 +172,88 @@ def extract_dependencies_from_diff(diff_content: str) -> list[dict]:
             g = GROUP_RE.search(block)
             a = ARTIFACT_RE.search(block)
             v = VERSION_RE.search(block)
-            if g and a and v:
-                ver = v.group(1).strip()
-                if not ver.startswith('$'):
-                    dependencies.append({
-                        "group_id":    g.group(1).strip(),
-                        "artifact_id": a.group(1).strip(),
-                        "version":     ver,
-                        "line_number": 0
-                    })
+            if g and a:
+                ver = v.group(1).strip() if v else ""
+                if ver.startswith('$'):
+                    ver = ""
+                dependencies.append({
+                    "group_id":       g.group(1).strip(),
+                    "artifact_id":    a.group(1).strip(),
+                    "version":        ver,
+                    "line_number":    0,
+                    "version_source": "explicit" if ver else "unknown",
+                })
 
     log.info(f"Extracted {len(dependencies)} dependencies from diff (fallback)")
     return dependencies
+
+
+# ── Parent POM & Dependency Management Resolution ─────────────────────────────
+
+def _extract_parent_info(pom_content: str) -> dict | None:
+    """
+    Extracts the <parent> block from a pom.xml to identify the parent POM.
+    Returns dict with group_id, artifact_id, version or None.
+    """
+    parent_block = re.search(
+        r'<parent>(.*?)</parent>', pom_content, re.DOTALL | re.IGNORECASE
+    )
+    if not parent_block:
+        return None
+
+    block = parent_block.group(1)
+    g = GROUP_RE.search(block)
+    a = ARTIFACT_RE.search(block)
+    v = VERSION_RE.search(block)
+
+    if g and a and v:
+        return {
+            "group_id":    g.group(1).strip(),
+            "artifact_id": a.group(1).strip(),
+            "version":     v.group(1).strip(),
+        }
+    return None
+
+
+def _resolve_managed_versions(
+    pom_content: str, properties: dict
+) -> dict[str, str]:
+    """
+    Extracts version info from <dependencyManagement> blocks.
+    Returns a map of "groupId:artifactId" → "version" for managed deps.
+
+    This handles cases where versions are declared in dependencyManagement
+    (either in this POM or imported via parent). For deps managed by a
+    parent BOM that isn't inlined, the version will remain unresolved.
+    """
+    managed: dict[str, str] = {}
+
+    # Find <dependencyManagement><dependencies>...</dependencies></dependencyManagement>
+    dm_block = re.search(
+        r'<dependencyManagement>\s*<dependencies>(.*?)</dependencies>\s*</dependencyManagement>',
+        pom_content, re.DOTALL | re.IGNORECASE
+    )
+    if not dm_block:
+        return managed
+
+    for match in DEP_BLOCK.finditer(dm_block.group(1)):
+        block = match.group(1)
+        g = GROUP_RE.search(block)
+        a = ARTIFACT_RE.search(block)
+        v = VERSION_RE.search(block)
+
+        if g and a and v:
+            version = v.group(1).strip()
+            # Resolve property references
+            if version.startswith('${') and version.endswith('}'):
+                prop_key = version[2:-1]
+                version = properties.get(prop_key, "")
+            if version and not version.startswith('$'):
+                key = f"{g.group(1).strip()}:{a.group(1).strip()}"
+                managed[key] = version
+                log.debug(f"  dependencyManagement: {key} → {version}")
+
+    return managed
 
 
 # ── OSV API — Two-Step Lookup with Parallel Fetching ──────────────────────────
@@ -157,16 +271,24 @@ def check_dependencies_for_cves(dependencies: list[dict]) -> list[dict]:
     # ── Step 1: Batch query ───────────────────────────────────────────────────
     log.info(f"OSV batch query for {len(dependencies)} dependencies...")
 
-    queries = [
-        {
-            "version": dep["version"],
+    queries = []
+    for dep in dependencies:
+        query = {
             "package": {
                 "name":      f"{dep['group_id']}:{dep['artifact_id']}",
                 "ecosystem": "Maven"
             }
         }
-        for dep in dependencies
-    ]
+        # Only include version if we have one — OSV without version returns
+        # ALL known vulns for that package (we filter by severity downstream)
+        if dep.get("version"):
+            query["version"] = dep["version"]
+        else:
+            log.info(
+                f"  {dep['group_id']}:{dep['artifact_id']} — "
+                f"no version (querying all known vulns)"
+            )
+        queries.append(query)
 
     try:
         resp = httpx.post(
@@ -188,7 +310,8 @@ def check_dependencies_for_cves(dependencies: list[dict]) -> list[dict]:
     vuln_to_dep: dict[str, dict] = {}
     for dep, result in zip(dependencies, batch_results):
         vulns = result.get("vulns", [])
-        dep_key = f"{dep['group_id']}:{dep['artifact_id']}:{dep['version']}"
+        ver_display = dep['version'] or '(parent-managed)'
+        dep_key = f"{dep['group_id']}:{dep['artifact_id']}:{ver_display}"
         log.info(f"  {dep_key} → {len(vulns)} vulns")
         for v in vulns:
             vid = v.get("id", "")
@@ -381,12 +504,29 @@ def _build_finding(vuln: dict, dep: dict) -> dict | None:
         log.debug(f"{vuln_id}: excluded (LOW severity)")
         return None
 
-    dep_coords = f"{dep['group_id']}:{dep['artifact_id']}:{dep['version']}"
+    version_display = dep['version'] or '(parent-managed)'
+    dep_coords = f"{dep['group_id']}:{dep['artifact_id']}:{version_display}"
     # Use the actual pom.xml path from the dep record if available,
     # otherwise fall back to generic name. Set line=0 so findings
     # cleanly route to PR thread comment (not inline), since CVE line
     # numbers reference the full file — not the diff context GitHub needs.
     pom_path = dep.get("pom_path", "pom.xml")
+
+    # Deps with a known version get high confidence (exact match against OSV).
+    # Parent-managed deps without a version get lower confidence because OSV
+    # returns ALL vulns for the package — the actual version in use (from
+    # the parent BOM) may not be affected.
+    version_source = dep.get("version_source", "explicit")
+    if dep.get("version"):
+        confidence = 0.97   # exact version match — factual
+    else:
+        confidence = 0.75   # no version — may be false positive
+
+    # Add a note for parent-managed deps so reviewers know the version
+    # needs manual verification
+    version_note = ""
+    if not dep.get("version"):
+        version_note = " (version managed by parent POM — verify actual version)"
 
     return {
         "finding_id":  f"cve_{cve_id.replace('-', '_').replace(':', '_').lower()}",
@@ -394,8 +534,8 @@ def _build_finding(vuln: dict, dep: dict) -> dict | None:
         "type":        "VULN_DEPENDENCY",
         "file":        pom_path,
         "line":        0,       # 0 → routes to PR thread, avoids 422 inline failures
-        "evidence":    f"{dep_coords} → {cve_id}",
-        "confidence":  0.97,      # OSV is a factual database — very high confidence
+        "evidence":    f"{dep_coords} → {cve_id}{version_note}",
+        "confidence":  confidence,
         "policy_ref":  "SEC-005",
         "remediation": (
             f"Upgrade {dep['artifact_id']} to a patched version. "

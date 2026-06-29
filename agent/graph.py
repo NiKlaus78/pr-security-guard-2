@@ -32,9 +32,11 @@ class SecurityScanState(TypedDict):
     pr_author: str
     pr_title: str
     diff_content: str
+    pom_xml_content: str              # Full pom.xml content when present in diff
 
     # Pipeline outputs (accumulate through nodes)
     prefilter_hits: List[dict]       # Fast regex hits
+    cve_findings: List[dict]          # OSV vulnerability scan results (CVEs)
     dep_scan_findings: List[dict]     # OSV vulnerability scan results
     raw_findings: List[dict]          # LLM initial findings
     critiqued_findings: List[dict]    # After self-reflection
