@@ -248,23 +248,22 @@ def check_dependencies_for_cves(dependencies: list[dict]) -> list[dict]:
     log.info(f"After deduplication: {len(deduplicated)} findings (was {len(cve_findings)})")
     return deduplicated
 
+
 def _deduplicate_by_dependency(findings: list) -> list:
     """
     Groups all CVEs for the same dependency into a single finding.
     Uses the most severe CVE as the headline, lists others in the evidence.
-
     Without this, log4j 2.14.1 with 7 CVEs produces 7 identical-looking
-    findings — which is noisy and unhelpful. One finding per dep is cleaner.
+    findings — noisy and unhelpful on the PR. One finding per dep is cleaner.
     """
     if not findings:
         return []
 
     severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
 
-    # Group by the dependency coordinates (group:artifact:version)
+    # Group by dep coordinates (everything before " → CVE-xxx")
     groups: dict[str, list] = {}
     for f in findings:
-        # evidence format: "group:artifact:version → CVE-xxx"
         dep_key = f.get("evidence", "").split(" → ")[0].strip()
         if not dep_key:
             dep_key = f.get("finding_id", "unknown")
@@ -272,12 +271,17 @@ def _deduplicate_by_dependency(findings: list) -> list:
 
     merged = []
     for dep_key, dep_findings in groups.items():
-        # Sort by severity — most critical first
-        dep_findings.sort(key=lambda x: severity_order.get(x.get("severity", "LOW"), 9))
-        primary = dict(dep_findings[0])  # copy
+        # Sort — most critical first
+        dep_findings.sort(
+            key=lambda x: severity_order.get(x.get("severity", "LOW"), 9)
+        )
+        primary = dict(dep_findings[0])  # copy the worst finding
 
         if len(dep_findings) > 1:
-            other_cves = [f.get("cve_id", f.get("osv_id", "?")) for f in dep_findings[1:]]
+            other_cves = [
+                f.get("cve_id", f.get("osv_id", "?"))
+                for f in dep_findings[1:]
+            ]
             shown = other_cves[:4]
             extra = len(other_cves) - 4
             extra_str = f" (+{extra} more)" if extra > 0 else ""
@@ -297,6 +301,7 @@ def _deduplicate_by_dependency(findings: list) -> list:
         merged.append(primary)
 
     return merged
+
 
 # ── Per-vuln fetch + build (runs inside thread pool) ─────────────────────────
 
@@ -377,13 +382,18 @@ def _build_finding(vuln: dict, dep: dict) -> dict | None:
         return None
 
     dep_coords = f"{dep['group_id']}:{dep['artifact_id']}:{dep['version']}"
+    # Use the actual pom.xml path from the dep record if available,
+    # otherwise fall back to generic name. Set line=0 so findings
+    # cleanly route to PR thread comment (not inline), since CVE line
+    # numbers reference the full file — not the diff context GitHub needs.
+    pom_path = dep.get("pom_path", "pom.xml")
 
     return {
         "finding_id":  f"cve_{cve_id.replace('-', '_').replace(':', '_').lower()}",
         "severity":    severity,
         "type":        "VULN_DEPENDENCY",
-        "file":        "pom.xml",
-        "line":        dep.get("line_number", 0),
+        "file":        pom_path,
+        "line":        0,       # 0 → routes to PR thread, avoids 422 inline failures
         "evidence":    f"{dep_coords} → {cve_id}",
         "confidence":  0.97,      # OSV is a factual database — very high confidence
         "policy_ref":  "SEC-005",

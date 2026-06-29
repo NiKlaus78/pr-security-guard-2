@@ -67,9 +67,7 @@ public class GitHubCommentService {
         try {
             webClient.post()
                     .uri(url)
-                    // Use 'token' scheme which is accepted for Personal Access Tokens and
-                    // is the traditional Authorization header value for GitHub API v3.
-                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(body)
@@ -84,20 +82,19 @@ public class GitHubCommentService {
         }
     }
 
-    // ── PR Review Comment (inline, attached to a specific line) ───────────
+    // ── PR Review Comment ──────────────────────────────────────────────────
 
     public void postFindingComment(String repo, Long prNumber, String headSha, JsonNode finding) {
-        // Post directly to PR thread. GitHub inline comments only accept lines
-        // that appear in the diff's + context — which we cannot reliably determine
-        // from the LLM's output (it references file line numbers, not diff positions).
-        // PR thread comments always work and keep all findings in one place.
+        // Always post to PR thread. GitHub inline comments require the exact
+        // diff position (not file line number) — which we don't have reliably.
+        // PR thread comments always succeed and keep all findings in one place.
         postIssueComment(repo, prNumber, formatFindingAsComment(finding));
-
         log.debug("Posted finding to PR thread | repo={} PR=#{} type={} severity={}",
                 repo, prNumber,
-                finding.path("type").asText(),
-                finding.path("severity").asText());
+                finding.path("type").asText("unknown"),
+                finding.path("severity").asText("unknown"));
     }
+
     // ── PR Thread Summary Comment ──────────────────────────────────────────
 
     public void postSummaryComment(String repo, Long prNumber, JsonNode findings, String decision) {
@@ -148,7 +145,7 @@ public class GitHubCommentService {
         try {
             webClient.post()
                     .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(Map.of("body", body))

@@ -474,5 +474,6 @@ def _prefilter_to_findings(hits: list) -> list:
         })
     return findings
 
-# Alias for backward compatibility with graph.py
+
+# Alias — keeps backward compatibility if graph.py uses old name
 dependency_scanner_node = cve_scanner_node
