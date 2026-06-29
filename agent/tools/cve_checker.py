@@ -465,5 +465,4 @@ def _deduplicate_by_dependency(findings: list) -> list:
             )
 
         merged.append(primary)
-
     return merged
