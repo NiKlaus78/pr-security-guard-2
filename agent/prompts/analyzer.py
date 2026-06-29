@@ -69,7 +69,7 @@ def build_analyzer_user_prompt(
     prefilter_hits: list,
     pr_title: str,
     pr_author: str,
-    dep_scan_findings: list = None
+    cve_findings: list = None
 ) -> str:
     """
     Builds the user-facing prompt with diff content, prefilter context,
@@ -99,9 +99,27 @@ Do NOT dismiss these unless the dependency was added in a test-only scope.
 
 """
 
-    return f"""## PR Context
-- Title: {pr_title}
-- Author: {pr_author}
+    cve_section = ""
+        if cve_findings:
+            cve_lines = "\n".join(
+                f"  - {c.get('cve_id', c.get('osv_id', '?'))} "
+                f"severity={c.get('severity','?')} in {c.get('evidence','?')[:100]}"
+                for c in cve_findings
+            )
+            cve_section = f"""
+    CONFIRMED CVEs FROM OSV DATABASE — treat these as established facts:
+    {cve_lines}
+    You MUST include a finding object for each of these in your JSON array.
+
+    """
+
+        return f"""PR: {pr_title} by {pr_author}
+
+    {prefilter_section}{cve_section}Git diff (scan ONLY lines starting with +):
+
+    {diff_content}
+
+    Return a JSON array. One object per violation. Start your response with [ immediately."""
 
 {prefilter_section}{dep_scan_section}## Git Diff to Analyze
 Analyze ONLY the lines beginning with + (added lines).
