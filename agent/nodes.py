@@ -218,6 +218,9 @@ def llm_analyzer_node(state: dict) -> dict:
 
         log.info(f"[{state['scan_id']}] LLM raw findings: {len(findings)}")
 
+        # Remove any LLM-hallucinated or duplicated CVE findings
+        findings = [f for f in findings if f.get("type") != "VULN_DEPENDENCY"]
+
         # ── Regex-merge safety net ────────────────────────────────────────────
         # If Mistral returned fewer findings than regex hits, it under-reported.
         prefilter_hits = state.get("prefilter_hits", [])
@@ -259,51 +262,70 @@ def self_reflection_node(state: dict) -> dict:
     """
     log.info(f"[{state['scan_id']}] Node: self_reflection")
 
-    raw_findings = state["raw_findings"]
-    if not raw_findings:
-        log.info(f"[{state['scan_id']}] No findings to critique.")
-        return {"critiqued_findings": []}
-
-    user_prompt = build_critique_user_prompt(
-        findings=raw_findings,
-        diff_content=state["diff_content"]
-    )
-
-    messages = [
-        SystemMessage(content=CRITIQUE_SYSTEM_PROMPT),
-        HumanMessage(content=user_prompt)
-    ]
-
     try:
-        response = llm.invoke(messages)
-        raw_text = response.content
+        raw_findings = state["raw_findings"]
+        if not raw_findings:
+            log.info(f"[{state['scan_id']}] No findings to critique.")
+            return {"critiqued_findings": []}
 
-        clean_json = raw_text.strip()
-        if clean_json.startswith("```"):
-            clean_json = re.sub(r"```(?:json)?\n?", "", clean_json).strip()
+        # Filter out ground-truth CVE findings from the ones we send to LLM for critique
+        findings_to_critique = [f for f in raw_findings if f.get("type") != "VULN_DEPENDENCY"]
 
-        critiques = json.loads(clean_json)
+        critique_map = {}
+        if findings_to_critique:
+            log.info(f"[{state['scan_id']}] Critiquing {len(findings_to_critique)} non-CVE findings...")
+            user_prompt = build_critique_user_prompt(
+                findings=findings_to_critique,
+                diff_content=state["diff_content"]
+            )
 
-        # Merge critique results back into findings
-        critique_map = {c["finding_id"]: c for c in critiques}
+            messages = [
+                SystemMessage(content=CRITIQUE_SYSTEM_PROMPT),
+                HumanMessage(content=user_prompt)
+            ]
+
+            try:
+                response = llm.invoke(messages)
+                raw_text = response.content
+
+                clean_json = raw_text.strip()
+                if clean_json.startswith("```"):
+                    clean_json = re.sub(r"```(?:json)?\n?", "", clean_json).strip()
+
+                critiques = json.loads(clean_json)
+                critique_map = {c["finding_id"]: c for c in critiques}
+            except Exception as e:
+                log.error(f"[{state['scan_id']}] Self-reflection LLM call failed: {e}")
+        else:
+            log.info(f"[{state['scan_id']}] No non-CVE findings to critique. Skipping critique LLM.")
 
         critiqued = []
         for finding in raw_findings:
             fid = finding.get("finding_id", str(uuid.uuid4())[:8])
             finding["finding_id"] = fid
 
-            critique = critique_map.get(fid, {})
-            initial_confidence = finding.get("confidence", 0.7)
-            adjustment = critique.get("confidence_adjustment", 0.0)
-            final_confidence = max(0.0, min(1.0, initial_confidence + adjustment))
+            if finding.get("type") == "VULN_DEPENDENCY":
+                # CVE findings are database facts — auto-confirm and preserve their high confidence
+                critiqued.append({
+                    **finding,
+                    "initial_confidence": finding.get("confidence", 0.97),
+                    "final_confidence": finding.get("confidence", 0.97),
+                    "critique_verdict": "CONFIRMED",
+                    "critique_rationale": "Factual CVE finding from OSV database — skipped critique."
+                })
+            else:
+                critique = critique_map.get(fid, {})
+                initial_confidence = finding.get("confidence", 0.7)
+                adjustment = critique.get("confidence_adjustment", 0.0)
+                final_confidence = max(0.0, min(1.0, initial_confidence + adjustment))
 
-            critiqued.append({
-                **finding,
-                "initial_confidence": initial_confidence,
-                "final_confidence": final_confidence,
-                "critique_verdict": critique.get("verdict", "CONFIRMED"),
-                "critique_rationale": critique.get("rationale", "No critique provided.")
-            })
+                critiqued.append({
+                    **finding,
+                    "initial_confidence": initial_confidence,
+                    "final_confidence": final_confidence,
+                    "critique_verdict": critique.get("verdict", "CONFIRMED"),
+                    "critique_rationale": critique.get("rationale", "No critique provided.")
+                })
 
         false_positives = sum(1 for f in critiqued if f["critique_verdict"] == "FALSE_POSITIVE")
         log.info(

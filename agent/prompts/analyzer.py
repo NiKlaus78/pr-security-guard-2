@@ -93,9 +93,8 @@ Also scan for any additional violations the regex may have missed.
             for c in cve_findings
         )
         cve_section = f"""
-CONFIRMED CVEs FROM OSV DATABASE (treat these as established facts, not guesses):
+CONFIRMED CVEs FROM OSV DATABASE (for security context only — do NOT output VULN_DEPENDENCY findings for these, as they are merged automatically by the system with correct line numbers):
 The following {len(cve_findings)} CVEs were confirmed by querying osv.dev.
-You MUST include a finding object for each one in your JSON array.
 
 {cve_lines}
 
