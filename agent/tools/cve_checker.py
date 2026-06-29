@@ -124,6 +124,49 @@ def resolve_spring_boot_bom_versions(pom_content: str) -> dict[str, str]:
     return versions
 
 
+def _resolve_fallback_group_version(group_id: str, bom_versions: dict[str, str]) -> str | None:
+    """
+    Attempts to resolve the version of a dependency by matching its groupId
+    against known imported BOMs in the Spring Boot BOM.
+    """
+    # 1. Jackson
+    if group_id.startswith("com.fasterxml.jackson"):
+        return bom_versions.get("com.fasterxml.jackson:jackson-bom")
+
+    # 2. Spring Security
+    if group_id.startswith("org.springframework.security"):
+        return bom_versions.get("org.springframework.security:spring-security-bom")
+
+    # 3. Spring Data
+    if group_id.startswith("org.springframework.data"):
+        return bom_versions.get("org.springframework.data:spring-data-bom")
+
+    # 4. Spring Framework (general)
+    if group_id.startswith("org.springframework"):
+        if ".boot" in group_id:
+            # spring-boot-starter-parent version is not in spring-framework-bom
+            return None
+        return bom_versions.get("org.springframework:spring-framework-bom")
+
+    # 5. Netty
+    if group_id.startswith("io.netty"):
+        return bom_versions.get("io.netty:netty-bom")
+
+    # 6. Project Reactor
+    if group_id.startswith("io.projectreactor"):
+        return bom_versions.get("io.projectreactor:reactor-bom")
+
+    # 7. Micrometer
+    if group_id.startswith("io.micrometer"):
+        return bom_versions.get("io.micrometer:micrometer-bom")
+
+    # 8. JUnit
+    if group_id.startswith("org.junit"):
+        return bom_versions.get("org.junit:junit-bom")
+
+    return None
+
+
 # ── Dependency Extraction ──────────────────────────────────────────────────────
 
 def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
@@ -175,6 +218,8 @@ def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
             # No explicit version — try BOM lookup
             bom_key = f"{group_id}:{artifact_id}"
             bom_ver = bom_versions.get(bom_key)
+            if not bom_ver:
+                bom_ver = _resolve_fallback_group_version(group_id, bom_versions)
             if not bom_ver:
                 log.debug(f"No version found for {bom_key} — skipping")
                 continue
