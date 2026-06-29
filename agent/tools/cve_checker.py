@@ -39,6 +39,27 @@ SEVERITY_MAP = {
     "LOW":      "LOW",
 }
 
+# Mapping of common Spring Boot starters to their core transitive dependencies.
+# This allows scanning transitive Spring libraries without fully resolving Maven dependency trees.
+STARTER_TRANSITIVE_MAP = {
+    "spring-boot-starter-web": [
+        ("org.springframework", "spring-web"),
+        ("org.springframework", "spring-webmvc"),
+    ],
+    "spring-boot-starter-security": [
+        ("org.springframework.security", "spring-security-web"),
+        ("org.springframework.security", "spring-security-config"),
+        ("org.springframework.security", "spring-security-core"),
+    ],
+    "spring-boot-starter-data-jpa": [
+        ("org.hibernate.orm", "hibernate-core"),
+    ],
+    "spring-boot-starter-webflux": [
+        ("org.springframework", "spring-webflux"),
+        ("io.projectreactor", "reactor-core"),
+    ],
+}
+
 # ── pom.xml regex patterns ─────────────────────────────────────────────────────
 
 GROUP_RE    = re.compile(r'<groupId>\s*([^<]+?)\s*</groupId>')
@@ -236,8 +257,37 @@ def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
             "line_number":    line_num
         })
 
+    # Step 4: Expand starters with their core transitive dependencies
+    expanded_dependencies = []
+    for dep in dependencies:
+        expanded_dependencies.append(dep)
+        art_id = dep["artifact_id"]
+        if art_id in STARTER_TRANSITIVE_MAP:
+            for trans_g, trans_a in STARTER_TRANSITIVE_MAP[art_id]:
+                # Skip duplicate entries
+                if any(d["group_id"] == trans_g and d["artifact_id"] == trans_a for d in dependencies):
+                    continue
+                # Resolve version
+                trans_key = f"{trans_g}:{trans_a}"
+                trans_ver = bom_versions.get(trans_key)
+                if not trans_ver:
+                    trans_ver = _resolve_fallback_group_version(trans_g, bom_versions)
+                
+                if trans_ver:
+                    expanded_dependencies.append({
+                        "group_id":       trans_g,
+                        "artifact_id":    trans_a,
+                        "version":        trans_ver,
+                        "version_source": f"transitive_from_{art_id}",
+                        "line_number":    dep["line_number"],  # map to the line of the starter
+                    })
+                    log.debug(f"  Expanded transitive: {trans_g}:{trans_a}:{trans_ver} from {art_id}")
+
+    dependencies = expanded_dependencies
+
     log.info(f"Extracted {len(dependencies)} dependencies from pom.xml "
-             f"({sum(1 for d in dependencies if d['version_source'] == 'bom')} BOM-resolved)")
+             f"({sum(1 for d in dependencies if d['version_source'] == 'bom')} BOM-resolved, "
+             f"{sum(1 for d in dependencies if d['version_source'].startswith('transitive'))} transitive)")
 
     for d in dependencies:
         log.debug(f"  {d['group_id']}:{d['artifact_id']}:{d['version']} [{d['version_source']}]")
