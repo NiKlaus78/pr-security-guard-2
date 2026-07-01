@@ -10,6 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from graph import build_security_graph
@@ -143,6 +144,17 @@ async def scan_pr(request: ScanRequest):
 @app.get("/health")
 async def health():
     return {"status": "UP", "service": "pr-security-guard-agent"}
+
+
+@app.get("/presentation")
+async def get_presentation():
+    import os
+    path = "/app/pr-security-guard-presentation.html"
+    if not os.path.exists(path):
+        path = "pr-security-guard-presentation.html"
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return HTMLResponse(content=content)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
