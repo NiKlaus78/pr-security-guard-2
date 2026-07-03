@@ -75,6 +75,18 @@ public class PrScanOrchestrator {
             }
 
             // ── Step 3: Build agent scan request ──────────────────────────
+            // Fetch full pom.xml content if it appears in the diff.
+            // Extract the ACTUAL path from the diff header — don't assume root-level pom.xml.
+            // e.g. diff could show "webhook-service/pom.xml" not just "pom.xml"
+            String pomXmlContent = "";
+            String pomXmlPath = extractPomXmlPath(diffContent);
+            if (pomXmlPath != null) {
+                log.info("pom.xml detected at '{}' — fetching full file for CVE scan | repo={} PR=#{}",
+                        pomXmlPath, repoFullName, prNumber);
+                pomXmlContent = diffExtractorService.fetchFileContent(
+                        repoFullName, pomXmlPath, headSha);
+            }
+
             AgentScanRequest request = AgentScanRequest.builder()
                     .prNumber(prNumber)
                     .repoFullName(repoFullName)
@@ -83,6 +95,7 @@ public class PrScanOrchestrator {
                     .prAuthor(payload.getPullRequest().getUser().getLogin())
                     .prTitle(payload.getPullRequest().getTitle())
                     .diffContent(diffContent)
+                    .pomXmlContent(pomXmlContent)
                     .build();
 
             // ── Step 4: Call Python LangGraph agent ────────────────────────
@@ -212,5 +225,28 @@ public class PrScanOrchestrator {
     private SecurityFinding.GateAction parseGateAction(String s) {
         try { return SecurityFinding.GateAction.valueOf(s); }
         catch (Exception e) { return SecurityFinding.GateAction.DISCARD; }
+    }
+
+    /**
+     * Extracts the actual pom.xml file path from a unified diff.
+     * Handles cases where pom.xml is in a subdirectory (e.g. webhook-service/pom.xml).
+     *
+     * Looks for lines like:
+     *   diff --git a/webhook-service/pom.xml b/webhook-service/pom.xml
+     */
+    private String extractPomXmlPath(String diffContent) {
+        for (String line : diffContent.split("\n")) {
+            if (line.startsWith("diff --git") && line.contains("pom.xml")) {
+                // Format: "diff --git a/path/pom.xml b/path/pom.xml"
+                // Extract the b/ path (the new version)
+                String[] parts = line.split(" ");
+                for (String part : parts) {
+                    if (part.startsWith("b/") && part.endsWith("pom.xml")) {
+                        return part.substring(2); // Strip the "b/" prefix
+                    }
+                }
+            }
+        }
+        return null;
     }
 }

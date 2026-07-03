@@ -67,9 +67,7 @@ public class GitHubCommentService {
         try {
             webClient.post()
                     .uri(url)
-                    // Use 'token' scheme which is accepted for Personal Access Tokens and
-                    // is the traditional Authorization header value for GitHub API v3.
-                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(body)
@@ -84,46 +82,17 @@ public class GitHubCommentService {
         }
     }
 
-    // ── PR Review Comment (inline, attached to a specific line) ───────────
+    // ── PR Review Comment ──────────────────────────────────────────────────
 
     public void postFindingComment(String repo, Long prNumber, String headSha, JsonNode finding) {
-        String file = finding.path("file").asText("");
-        int line = finding.path("line").asInt(0);
-
-        if (file.isBlank() || line <= 0) {
-            // Fall back to PR thread comment if we don't have a valid line
-            postIssueComment(repo, prNumber, formatFindingAsComment(finding));
-            return;
-        }
-
-        String url = String.format("%s/repos/%s/pulls/%d/comments", githubApiBase, repo, prNumber);
-
-        Map<String, Object> body = new HashMap<>();
-        body.put("body", formatFindingAsComment(finding));
-        body.put("commit_id", headSha);
-        body.put("path", file);
-        body.put("line", line);
-        body.put("side", "RIGHT");
-
-        try {
-            webClient.post()
-                    .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
-                    .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(body)
-                    .retrieve()
-                    .bodyToMono(String.class)
-                    .timeout(Duration.ofSeconds(10))
-                    .block();
-
-            log.debug("Posted inline comment | repo={} PR=#{} file={} line={}",
-                    repo, prNumber, file, line);
-        } catch (Exception e) {
-            // If inline comment fails (e.g. line not in diff), fall back to PR thread
-            log.warn("Inline comment failed, falling back to PR thread | {}", e.getMessage());
-            postIssueComment(repo, prNumber, formatFindingAsComment(finding));
-        }
+        // Always post to PR thread. GitHub inline comments require the exact
+        // diff position (not file line number) — which we don't have reliably.
+        // PR thread comments always succeed and keep all findings in one place.
+        postIssueComment(repo, prNumber, formatFindingAsComment(finding));
+        log.debug("Posted finding to PR thread | repo={} PR=#{} type={} severity={}",
+                repo, prNumber,
+                finding.path("type").asText("unknown"),
+                finding.path("severity").asText("unknown"));
     }
 
     // ── PR Thread Summary Comment ──────────────────────────────────────────
@@ -176,7 +145,7 @@ public class GitHubCommentService {
         try {
             webClient.post()
                     .uri(url)
-                    .header(HttpHeaders.AUTHORIZATION, "token " + githubToken)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
                     .header(HttpHeaders.ACCEPT, "application/vnd.github+json")
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(Map.of("body", body))
