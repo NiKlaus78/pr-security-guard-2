@@ -30,9 +30,12 @@ public class AgentScanRequest {
     @JsonProperty("pr_author")
     private String prAuthor;
 
+    @JsonProperty("pr_title")
+    private String prTitle;
+
     @JsonProperty("diff_content")
     private String diffContent;
 
-    @JsonProperty("pr_title")
-    private String prTitle;
+    @JsonProperty("pom_xml_content")
+    private String pomXmlContent;    // Full pom.xml content when changed in PR
 }

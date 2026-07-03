@@ -2,100 +2,108 @@
 Prompt for Stage 2: LLM Security Analyzer
 
 Engineered for fintech/banking context (PCI-DSS, FCA, GDPR).
-Returns strictly valid JSON — no prose, no markdown.
+Tuned specifically for Mistral Codestral which is a code-completion
+model — requires more explicit enumeration instructions than chat models.
 """
 
 import json
 
-ANALYZER_SYSTEM_PROMPT = """You are an expert application security engineer specializing in fintech \
-and banking systems with deep knowledge of PCI-DSS, FCA regulations, and GDPR compliance.
+ANALYZER_SYSTEM_PROMPT = """You are a security vulnerability scanner for a fintech bank. \
+Scan the git diff and return ALL security violations as a JSON array.
 
-Your job: analyze a git diff and identify security vulnerabilities in ADDED lines only.
+CRITICAL INSTRUCTION: You MUST create one separate JSON object for EVERY SINGLE violation found.
+If there are 10 hardcoded secrets on 10 different lines, return 10 separate objects.
+Do NOT merge or summarise multiple violations into one. Each line violation = one finding object.
 
-## Output Format
-Return ONLY a valid JSON array of findings. No prose, no markdown, no explanation outside the JSON.
+Return ONLY a raw JSON array. No markdown. No prose. No backticks. Start with [ and end with ].
 
-Schema for each finding:
+Each object in the array must have exactly these fields:
 {
-  "finding_id": "<unique 8-char alphanumeric>",
-  "severity": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
-  "type": "<finding type from list below>",
-  "file": "<file path from diff>",
-  "line": <integer line number, 0 if unknown>,
-  "evidence": "<exact code snippet, max 200 chars>",
-  "confidence": <float 0.0 to 1.0>,
-  "policy_ref": "<SEC-001 to SEC-010>",
-  "remediation": "<specific actionable fix, 1-2 sentences>"
+  "finding_id": "f001",
+  "severity": "CRITICAL",
+  "type": "SECRET_EXPOSURE",
+  "file": "path/to/file.java",
+  "line": 42,
+  "evidence": "exact offending code snippet here",
+  "confidence": 0.95,
+  "policy_ref": "SEC-001",
+  "remediation": "Move to environment variable or secrets manager."
 }
 
-## Finding Types
-- SECRET_EXPOSURE      (hardcoded API keys, passwords, tokens)
-- PRIVATE_KEY          (RSA/EC private keys in code)
-- DB_CREDENTIALS       (database URLs with credentials)
-- SQL_INJECTION        (string concatenation in SQL queries)
-- VULN_DEPENDENCY      (known CVE in added/updated dependency)
-- PCI_VIOLATION        (card data, CVV, PAN in logs or plaintext)
-- BROKEN_AUTH          (JWT not verified, role check removed/bypassed)
-- INSECURE_DESERIALIZE (ObjectInputStream from untrusted source)
-- CSRF_DISABLED        (csrf().disable() without justification)
-- CORS_WILDCARD        (cors allowedOrigins="*" in production config)
-- SENSITIVE_IN_LOGS    (PII, card data, credentials in log statements)
-- HARDCODED_URL        (internal production URLs, IPs hardcoded)
+severity must be one of: CRITICAL, HIGH, MEDIUM, LOW
+type must be one of: SECRET_EXPOSURE, PRIVATE_KEY, DB_CREDENTIALS, SQL_INJECTION,
+  VULN_DEPENDENCY, PCI_VIOLATION, BROKEN_AUTH, INSECURE_DESERIALIZE,
+  CSRF_DISABLED, CORS_WILDCARD, SENSITIVE_IN_LOGS, HARDCODED_URL
 
-## Policy References
-- SEC-001: No secrets or credentials in source code
-- SEC-002: No PII/card data in log statements (PCI-DSS 3.4)
-- SEC-003: All SQL queries must use parameterized statements
-- SEC-004: All JWT tokens must be verified before use
-- SEC-005: Dependencies must not introduce CVEs with CVSS >= 7.0
-- SEC-006: CSRF protection must not be disabled without compensating controls
-- SEC-007: CORS must not use wildcard origins in non-development environments
-- SEC-008: No hardcoded internal infrastructure URLs
-- SEC-009: Private keys must never appear in source code
-- SEC-010: Authentication and authorization checks must not be removed
+Policy references:
+SEC-001 = hardcoded secrets/credentials
+SEC-002 = PII or card data in logs (PCI-DSS 3.4)
+SEC-003 = SQL string concatenation (use parameterized queries)
+SEC-004 = JWT not verified
+SEC-005 = vulnerable dependency (CVSS >= 7.0)
+SEC-006 = CSRF disabled
+SEC-007 = CORS wildcard origin
+SEC-008 = hardcoded internal URLs or IPs
+SEC-009 = private key in source code
+SEC-010 = auth/role check removed
 
-## Critical Rules
-1. Only analyze ADDED lines (lines beginning with + in the diff, not +++)
-2. NEVER flag deleted lines (starting with -)
-3. For test files (path contains: test, spec, mock, fixture) → set confidence to 0.40 max
-4. For environment variable references (${VAR}, process.env.X, @Value) → do NOT flag
-5. Only flag dependency CVEs with CVSS score >= 7.0
-6. If no findings, return empty array: []
-7. Never fabricate file paths or line numbers — use only what is in the diff"""
+Rules:
+- ONLY flag lines starting with + (added lines). Never flag lines starting with -.
+- Each hardcoded secret on its own line = its own finding object with that line number.
+- Test files (path has: test, spec, mock, fixture) = confidence max 0.40.
+- Environment variable references like ${VAR}, System.getenv(), or variable names concatenated with prefixes (e.g. "Bearer " + token, "token " + githubToken) = skip, NOT a secret exposure (only literal hardcoded secrets are violations).
+- If absolutely nothing found, return exactly: []"""
 
 
 def build_analyzer_user_prompt(
     diff_content: str,
     prefilter_hits: list,
     pr_title: str,
-    pr_author: str
+    pr_author: str,
+    cve_findings: list = None
 ) -> str:
     """
-    Builds the user-facing prompt with diff content and prefilter context.
+    Builds the user prompt. For Mistral Codestral we make the
+    pre-filter hints MANDATORY rather than optional — the model
+    must address every single regex hit explicitly.
+    CVE findings are injected as confirmed facts from OSV database.
     """
 
     prefilter_section = ""
     if prefilter_hits:
+        hit_lines = "\n".join(
+            f"  - Line {h['diff_line']}: [{h['severity']}] {h['type']} → {h['line_content'][:120]}"
+            for h in prefilter_hits
+        )
         prefilter_section = f"""
-## Pre-filter Hints (Regex Detected)
-The following patterns were detected by fast regex pre-scan.
-Verify each carefully — they may be false positives:
+MANDATORY: The following {len(prefilter_hits)} violations were already confirmed by regex scanner.
+You MUST include a separate finding object for each one of these in your JSON array.
+Do not skip any. Do not merge them together.
 
-{json.dumps(prefilter_hits, indent=2)}
+{hit_lines}
+
+Also scan for any additional violations the regex may have missed.
 
 """
 
-    return f"""## PR Context
-- Title: {pr_title}
-- Author: {pr_author}
+    cve_section = ""
+    if cve_findings:
+        cve_lines = "\n".join(
+            f"  - {c['cve_id']} (CVSS {c.get('cvss_score', '?')}) in {c['evidence']} — {c['summary'][:120]}"
+            for c in cve_findings
+        )
+        cve_section = f"""
+CONFIRMED CVEs FROM OSV DATABASE (for security context only — do NOT output VULN_DEPENDENCY findings for these, as they are merged automatically by the system with correct line numbers):
+The following {len(cve_findings)} CVEs were confirmed by querying osv.dev.
 
-{prefilter_section}## Git Diff to Analyze
-Analyze ONLY the lines beginning with + (added lines).
-Do NOT flag lines beginning with - (removed lines).
+{cve_lines}
 
-```diff
+"""
+
+    return f"""PR: {pr_title} by {pr_author}
+
+{prefilter_section}{cve_section}Git diff (scan ONLY lines starting with +):
+
 {diff_content}
-```
 
-Return your findings as a JSON array following the schema in your instructions.
-If there are no findings, return: []"""
+Return a JSON array. One object per violation. Start your response with [ immediately."""

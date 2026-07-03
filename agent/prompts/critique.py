@@ -33,7 +33,7 @@ Schema:
 ### Mark FALSE_POSITIVE when:
 - The flagged code is in a test/mock/fixture/spec file (path contains: test, spec, mock, fixture, __tests__, example)
 - The "secret" is clearly a placeholder (e.g., "your-api-key-here", "changeme", "example", "placeholder")
-- The value is an environment variable reference: ${VAR_NAME}, process.env.X, @Value("${...}"), System.getenv()
+- The value is an environment variable reference or variable concatenation: ${VAR_NAME}, process.env.X, @Value("${...}"), System.getenv(), "Bearer " + token, "token " + githubToken
 - The "secret" is obviously fake (e.g., all zeros, "password123" in a README example)
 - The flagged pattern is in a comment or documentation string
 
