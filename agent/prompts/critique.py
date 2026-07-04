@@ -36,6 +36,13 @@ Schema:
 - The value is an environment variable reference or variable concatenation: ${VAR_NAME}, process.env.X, @Value("${...}"), System.getenv(), "Bearer " + token, "token " + githubToken
 - The "secret" is obviously fake (e.g., all zeros, "password123" in a README example)
 - The flagged pattern is in a comment or documentation string
+- The flagged code is ITSELF a regex/pattern definition used by a security scanner
+  (e.g. `re.compile(r'...eval...')`, `Pattern.compile("...")`, a tuple/list entry
+  pairing a regex string with a finding type like "EVAL_INJECTION" or "SQL_INJECTION").
+  This is a security tool's own detection rule, not an actual dangerous function call —
+  words like "eval", "exec", "os.system", "pickle.loads" appearing as literal pattern
+  text are not violations. Look for `re.compile(`, `Pattern.compile(`, or the flagged
+  line being part of a list of (pattern, type, severity) tuples as the signal.
 
 ### Reduce confidence by 0.20-0.35 when:
 - The file path suggests it's a configuration template or example

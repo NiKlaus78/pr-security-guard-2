@@ -65,6 +65,16 @@ SECRET_PATTERNS = [
 CVV_LOG_PATTERN = re.compile(r'(?i)(log|print|console)\s*[\.\(].*?(cvv|card.?number|pan|ssn)', re.DOTALL)
 SQL_INJECT_PATTERN = re.compile(r'(?i)(["\']\s*\+\s*\w+|string\.format\s*\(.*?select|"SELECT.*?" \+)', re.DOTALL)
 
+# Guard against a scanner's own source code tripping its own patterns.
+# A line like: (re.compile(r'(?i)\beval\s*\('), "EVAL_INJECTION", "HIGH"),
+# is a PATTERN DEFINITION, not an actual eval() call — but both regex search
+# and the LLM can mistake the literal keyword for a real dangerous call.
+PATTERN_DEFINITION_GUARD = re.compile(
+    r're\.compile\s*\(|'          # Python: defining a regex
+    r'Pattern\.compile\s*\(|'     # Java: defining a regex
+    r'new\s+RegExp\s*\('          # JavaScript: defining a regex
+)
+
 # Dangerous function-call patterns — language-agnostic safety net.
 # LLM-only findings (SQL injection, eval, deserialization) have no database
 # fact-check like CVEs do, so Mistral under-reports these inconsistently.
@@ -126,17 +136,24 @@ def regex_prefilter_node(state: dict) -> dict:
                 })
                 break  # One hit per line is enough
 
-        for pattern, finding_type, severity in DANGEROUS_CALL_PATTERNS:
-            if pattern.search(line_content):
-                hits.append({
-                    "type": finding_type,
-                    "severity": severity,
-                    "line_content": line_content.strip(),
-                    "diff_line": line_num,
-                    "file": file_path,
-                    "source": "regex_dangerous_call"
-                })
-                break
+        # Skip DANGEROUS_CALL_PATTERNS matches on lines that are themselves
+        # defining a regex/pattern (e.g. security-scanner source code) —
+        # these mention keywords like "eval", "exec", "os.system" as literal
+        # pattern text, not as actual dangerous function calls.
+        is_pattern_definition = PATTERN_DEFINITION_GUARD.search(line_content)
+
+        if not is_pattern_definition:
+            for pattern, finding_type, severity in DANGEROUS_CALL_PATTERNS:
+                if pattern.search(line_content):
+                    hits.append({
+                        "type": finding_type,
+                        "severity": severity,
+                        "line_content": line_content.strip(),
+                        "diff_line": line_num,
+                        "file": file_path,
+                        "source": "regex_dangerous_call"
+                    })
+                    break
 
         # Check CVV logging
         if CVV_LOG_PATTERN.search(line_content):
