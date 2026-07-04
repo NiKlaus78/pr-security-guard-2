@@ -26,6 +26,8 @@ from prompts.critique import CRITIQUE_SYSTEM_PROMPT, build_critique_user_prompt
 from tools.cve_checker import (
     extract_dependencies_from_diff,
     extract_dependencies_from_full_pom,
+    extract_dependencies_from_package_json,
+    extract_dependencies_from_requirements_txt,
     check_dependencies_for_cves
 )
 
@@ -63,11 +65,34 @@ SECRET_PATTERNS = [
 CVV_LOG_PATTERN = re.compile(r'(?i)(log|print|console)\s*[\.\(].*?(cvv|card.?number|pan|ssn)', re.DOTALL)
 SQL_INJECT_PATTERN = re.compile(r'(?i)(["\']\s*\+\s*\w+|string\.format\s*\(.*?select|"SELECT.*?" \+)', re.DOTALL)
 
+# Dangerous function-call patterns — language-agnostic safety net.
+# LLM-only findings (SQL injection, eval, deserialization) have no database
+# fact-check like CVEs do, so Mistral under-reports these inconsistently.
+# This regex floor guarantees well-known dangerous one-liners are always
+# caught across Java, JavaScript, and Python.
+DANGEROUS_CALL_PATTERNS = [
+    (re.compile(r'(?i)\beval\s*\('), "EVAL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)\bexec\s*\('), "EVAL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)pickle\.loads?\s*\('), "INSECURE_DESERIALIZE", "HIGH"),
+    (re.compile(r'(?i)subprocess\.(run|call|popen|check_output)\s*\([^)]*shell\s*=\s*True'), "COMMAND_INJECTION", "HIGH"),
+    (re.compile(r'(?i)\bos\.system\s*\('), "COMMAND_INJECTION", "HIGH"),
+    (re.compile(r'(?i)(child_process\.)?exec(Sync)?\s*\([^)]*\+'), "COMMAND_INJECTION", "HIGH"),
+    (re.compile(r'(?i)jwt\.decode\s*\('), "BROKEN_AUTH", "HIGH"),
+    (re.compile(r'(?i)yaml\.load\s*\('), "INSECURE_DESERIALIZE", "MEDIUM"),
+    (re.compile(r'Runtime\.getRuntime\(\)\.exec\s*\('), "COMMAND_INJECTION", "HIGH"),
+    (re.compile(r'new\s+ObjectInputStream\s*\('), "INSECURE_DESERIALIZE", "HIGH"),
+    (re.compile(r'(?i)(SELECT|INSERT|UPDATE|DELETE)\b[^"\']*["\'][^"\']*["\']?\s*\+\s*\w+'), "SQL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)(SELECT|INSERT|UPDATE|DELETE)\b.*[\'"]\s*%\s*\w+'), "SQL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)f["\'][^"\']*?(SELECT|INSERT|UPDATE|DELETE)\b[^"\']*\{[^}]+\}'), "SQL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)res\.(send|write)\s*\([^)]*req\.(query|body|params)'), "XSS_RISK", "MEDIUM"),
+]
+
 
 def regex_prefilter_node(state: dict) -> dict:
     """
     Fast regex pre-filter. No LLM calls. Runs in milliseconds.
-    Finds obvious secrets and flags them to inform the LLM analyzer.
+    Finds obvious secrets and dangerous calls, flags them to inform the LLM analyzer.
+    Language-agnostic — tracks which file each hit belongs to via diff headers.
     """
     log.info(f"[{state['scan_id']}] Node: regex_prefilter")
 
@@ -75,12 +100,20 @@ def regex_prefilter_node(state: dict) -> dict:
     hits = []
 
     # Only scan added lines (lines starting with + but not +++)
+    # Track current file by walking "diff --git" headers as we go
     added_lines = []
+    current_file = "unknown"
     for i, line in enumerate(diff.split("\n"), 1):
-        if line.startswith("+") and not line.startswith("+++"):
-            added_lines.append((i, line[1:]))  # Strip leading +
+        if line.startswith("diff --git"):
+            parts = line.split(" ")
+            for p in parts:
+                if p.startswith("b/"):
+                    current_file = p[2:]
+                    break
+        elif line.startswith("+") and not line.startswith("+++"):
+            added_lines.append((i, line[1:], current_file))  # Strip leading +
 
-    for line_num, line_content in added_lines:
+    for line_num, line_content, file_path in added_lines:
         for pattern, finding_type, severity in SECRET_PATTERNS:
             if pattern.search(line_content):
                 hits.append({
@@ -88,9 +121,22 @@ def regex_prefilter_node(state: dict) -> dict:
                     "severity": severity,
                     "line_content": line_content.strip(),
                     "diff_line": line_num,
+                    "file": file_path,
                     "source": "regex_prefilter"
                 })
                 break  # One hit per line is enough
+
+        for pattern, finding_type, severity in DANGEROUS_CALL_PATTERNS:
+            if pattern.search(line_content):
+                hits.append({
+                    "type": finding_type,
+                    "severity": severity,
+                    "line_content": line_content.strip(),
+                    "diff_line": line_num,
+                    "file": file_path,
+                    "source": "regex_dangerous_call"
+                })
+                break
 
         # Check CVV logging
         if CVV_LOG_PATTERN.search(line_content):
@@ -99,6 +145,7 @@ def regex_prefilter_node(state: dict) -> dict:
                 "severity": "HIGH",
                 "line_content": line_content.strip(),
                 "diff_line": line_num,
+                "file": file_path,
                 "source": "regex_prefilter"
             })
 
@@ -110,65 +157,106 @@ def regex_prefilter_node(state: dict) -> dict:
 
 def cve_scanner_node(state: dict) -> dict:
     """
-    Scans pom.xml for Maven dependencies and queries OSV API for known CVEs.
+    Scans dependency manifests for known CVEs via OSV API.
+    Supports three ecosystems, detected independently from the diff:
+      pom.xml          → Maven  (Java)      — includes BOM resolution + transitive expansion
+      package.json     → npm    (JavaScript/Node.js)
+      requirements.txt → PyPI   (Python)
 
-    Uses the FULL pom.xml content (not just the diff) so that pre-existing
-    vulnerable dependencies are also caught — not just newly added ones.
+    Uses the FULL manifest content (not just the diff) so pre-existing
+    vulnerable dependencies are caught, not just newly added ones.
     """
     log.info(f"[{state['scan_id']}] Node: cve_scanner")
 
     diff = state["diff_content"]
+    all_dependencies = []
+
+    # ── Maven: pom.xml (BOM resolution + transitive expansion happens inside) ──
     pom_xml_content = state.get("pom_xml_content", "")
+    if "pom.xml" in diff:
+        pom_path = "pom.xml"
+        for line in diff.split("\n"):
+            if line.startswith("diff --git") and "pom.xml" in line:
+                parts = line.split()
+                for p in parts:
+                    if p.startswith("b/") and p.endswith("pom.xml"):
+                        pom_path = p[2:]
+                        break
+                break
+        log.info(f"[{state['scan_id']}] pom.xml path in repo: {pom_path}")
 
-    # Only run if pom.xml is in the diff
-    if "pom.xml" not in diff:
-        log.info(f"[{state['scan_id']}] No pom.xml in diff — skipping CVE scan")
+        if pom_xml_content:
+            log.info(
+                f"[{state['scan_id']}] Using full pom.xml content "
+                f"({len(pom_xml_content)} chars) — scanning ALL dependencies"
+            )
+            deps = extract_dependencies_from_full_pom(pom_xml_content)
+        else:
+            log.warning(f"[{state['scan_id']}] Full pom.xml not available — falling back to diff-only")
+            deps = extract_dependencies_from_diff(diff)
+
+        for dep in deps:
+            dep["pom_path"] = pom_path
+            dep["manifest_path"] = pom_path
+        all_dependencies.extend(deps)
+
+    # ── npm: package.json ───────────────────────────────────────────────────
+    package_json_content = state.get("package_json_content", "")
+    if "package.json" in diff:
+        pkg_path = _extract_manifest_path(diff, "package.json")
+        log.info(f"[{state['scan_id']}] package.json detected at '{pkg_path}'")
+        if package_json_content:
+            deps = extract_dependencies_from_package_json(package_json_content)
+            for dep in deps:
+                dep["manifest_path"] = pkg_path
+            all_dependencies.extend(deps)
+        else:
+            log.warning(f"[{state['scan_id']}] Full package.json unavailable — skipping npm CVE scan")
+
+    # ── PyPI: requirements.txt ──────────────────────────────────────────────
+    requirements_content = state.get("requirements_txt_content", "")
+    if "requirements.txt" in diff:
+        req_path = _extract_manifest_path(diff, "requirements.txt")
+        log.info(f"[{state['scan_id']}] requirements.txt detected at '{req_path}'")
+        if requirements_content:
+            deps = extract_dependencies_from_requirements_txt(requirements_content)
+            for dep in deps:
+                dep["manifest_path"] = req_path
+            all_dependencies.extend(deps)
+        else:
+            log.warning(f"[{state['scan_id']}] Full requirements.txt unavailable — skipping PyPI CVE scan")
+
+    if not all_dependencies:
+        log.info(f"[{state['scan_id']}] No dependency manifests found in diff — skipping CVE scan")
         return {"cve_findings": []}
 
-    # Extract actual pom.xml path from diff header (e.g. "webhook-service/pom.xml")
-    pom_path = "pom.xml"
-    for line in diff.split("\n"):
-        if line.startswith("diff --git") and "pom.xml" in line:
-            parts = line.split()
-            for p in parts:
-                if p.startswith("b/") and p.endswith("pom.xml"):
-                    pom_path = p[2:]  # strip "b/"
-                    break
-            break
-    log.info(f"[{state['scan_id']}] pom.xml path in repo: {pom_path}")
+    log.info(
+        f"[{state['scan_id']}] Checking {len(all_dependencies)} dependencies "
+        f"across {len({d.get('ecosystem', 'Maven') for d in all_dependencies})} ecosystem(s) against OSV..."
+    )
 
-    # Prefer full pom.xml content over diff — catches ALL deps, not just new ones
-    if pom_xml_content:
-        log.info(
-            f"[{state['scan_id']}] Using full pom.xml content "
-            f"({len(pom_xml_content)} chars) — scanning ALL dependencies"
-        )
-        dependencies = extract_dependencies_from_full_pom(pom_xml_content)
-    else:
-        log.warning(
-            f"[{state['scan_id']}] Full pom.xml not available — "
-            f"falling back to diff-only"
-        )
-        dependencies = extract_dependencies_from_diff(diff)
-
-    if not dependencies:
-        log.info(f"[{state['scan_id']}] No dependencies found in pom.xml")
-        return {"cve_findings": []}
-
-    # Attach the real pom path to each dep so CVE findings show the correct file
-    for dep in dependencies:
-        dep["pom_path"] = pom_path
-
-    log.info(f"[{state['scan_id']}] Checking {len(dependencies)} dependencies against OSV...")
-
-    cve_findings = check_dependencies_for_cves(dependencies)
+    cve_findings = check_dependencies_for_cves(all_dependencies)
 
     log.info(
         f"[{state['scan_id']}] CVE scan complete | "
-        f"dependencies_checked={len(dependencies)} cves_found={len(cve_findings)}"
+        f"dependencies_checked={len(all_dependencies)} cves_found={len(cve_findings)}"
     )
 
     return {"cve_findings": cve_findings}
+
+
+def _extract_manifest_path(diff_content: str, filename: str) -> str:
+    """
+    Extracts the actual repo-relative path of a manifest file from the diff header.
+    Handles monorepo layouts e.g. "backend/package.json" not just "package.json".
+    """
+    for line in diff_content.split("\n"):
+        if line.startswith("diff --git") and filename in line:
+            parts = line.split()
+            for p in parts:
+                if p.startswith("b/") and p.endswith(filename):
+                    return p[2:]
+    return filename
 
 
 # ── Node 3: LLM Security Analyzer ─────────────────────────────────────────────
@@ -464,14 +552,20 @@ def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list
         )
 
         if not already_covered:
+            severity_confidence = {
+                "CRITICAL": 0.93,
+                "HIGH": 0.88,
+                "MEDIUM": 0.70,
+                "LOW": 0.50,
+            }
             merged.append({
                 "finding_id": f"regex_{i:03d}",
                 "severity": hit["severity"],
                 "type": hit["type"],
-                "file": "unknown",
+                "file": hit.get("file", "unknown"),
                 "line": diff_line,
                 "evidence": hit["line_content"][:200],
-                "confidence": 0.88,   # High confidence — regex pattern confirmed
+                "confidence": severity_confidence.get(hit["severity"], 0.75),
                 "policy_ref": "SEC-001",
                 "remediation": "Move to environment variables or a secrets manager (e.g. AWS Secrets Manager, Vault)."
             })
@@ -481,16 +575,23 @@ def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list
 
 def _prefilter_to_findings(hits: list) -> list:
     """Convert regex prefilter hits to finding format as fallback."""
+    severity_confidence = {
+        "CRITICAL": 0.92,
+        "HIGH": 0.80,
+        "MEDIUM": 0.65,
+        "LOW": 0.50,
+    }
     findings = []
     for i, hit in enumerate(hits):
+        severity = hit["severity"]
         findings.append({
             "finding_id": f"regex_{i:03d}",
-            "severity": hit["severity"],
+            "severity": severity,
             "type": hit["type"],
-            "file": "unknown",
-            "line": 0,
+            "file": hit.get("file", "unknown"),
+            "line": hit.get("diff_line", 0),
             "evidence": hit["line_content"][:200],
-            "confidence": 0.75,
+            "confidence": severity_confidence.get(severity, 0.75),
             "policy_ref": "SEC-001",
             "remediation": "Move to environment variables or secrets manager."
         })
