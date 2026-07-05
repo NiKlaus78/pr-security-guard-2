@@ -122,30 +122,77 @@ DANGEROUS_CALL_PATTERNS = [
 ]
 
 
-def regex_prefilter_node(state: dict) -> dict:
-    """
-    Fast regex pre-filter. No LLM calls. Runs in milliseconds.
-    Finds obvious secrets and dangerous calls, flags them to inform the LLM analyzer.
-    Language-agnostic — tracks which file each hit belongs to via diff headers.
-    """
-    log.info(f"[{state['scan_id']}] Node: regex_prefilter")
+HUNK_HEADER_PATTERN = re.compile(r'^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 
-    diff = state["diff_content"]
-    hits = []
 
-    # Only scan added lines (lines starting with + but not +++)
-    # Track current file by walking "diff --git" headers as we go
-    added_lines = []
+def _extract_added_lines_with_real_line_numbers(diff_content: str) -> list[tuple[int, str, str]]:
+    """
+    Parses a unified diff and returns (real_file_line_number, line_content, file_path)
+    for every ADDED line, using proper unified-diff hunk-header semantics.
+
+    Critical fix: a naive `enumerate(diff.split("\\n"))` numbers every line of the
+    RAW DIFF TEXT (including "diff --git" headers, "index" lines, "---"/"+++"
+    markers, hunk headers, and unchanged context lines across ALL files in the
+    diff) — this does NOT correspond to the actual line number within the target
+    file, and produces wildly incorrect line numbers especially in multi-file PRs.
+
+    Correct algorithm: track the "new file" line counter per hunk. Each hunk
+    header "@@ -oldStart,oldCount +newStart,newCount @@" tells us the starting
+    line number in the NEW file. From there:
+      - a "+" line occupies the current new-file line, then counter increments
+      - a " " (context) line exists in both files, counter increments
+      - a "-" line was removed, doesn't exist in the new file, counter does NOT increment
+    """
+    results = []
     current_file = "unknown"
-    for i, line in enumerate(diff.split("\n"), 1):
+    new_file_line = 0  # Current line number in the target (new) file
+
+    for line in diff_content.split("\n"):
         if line.startswith("diff --git"):
             parts = line.split(" ")
             for p in parts:
                 if p.startswith("b/"):
                     current_file = p[2:]
                     break
-        elif line.startswith("+") and not line.startswith("+++"):
-            added_lines.append((i, line[1:], current_file))  # Strip leading +
+            new_file_line = 0  # Reset — will be set by the next hunk header
+            continue
+
+        hunk_match = HUNK_HEADER_PATTERN.match(line)
+        if hunk_match:
+            new_file_line = int(hunk_match.group(1))
+            continue
+
+        if line.startswith("+++") or line.startswith("---") or line.startswith("index "):
+            continue  # File metadata lines, not content
+
+        if line.startswith("+"):
+            # This IS the current new-file line — record it, then advance
+            results.append((new_file_line, line[1:], current_file))
+            new_file_line += 1
+        elif line.startswith("-"):
+            # Removed line — doesn't exist in the new file, don't advance counter
+            continue
+        else:
+            # Context line (unchanged) — exists in both files, counter advances
+            new_file_line += 1
+
+    return results
+
+
+def regex_prefilter_node(state: dict) -> dict:
+    """
+    Fast regex pre-filter. No LLM calls. Runs in milliseconds.
+    Finds obvious secrets and dangerous calls, flags them to inform the LLM analyzer.
+    Language-agnostic — tracks which file each hit belongs to via diff headers,
+    and computes REAL target-file line numbers by parsing unified diff hunk
+    headers (not a naive line count across the whole raw diff text).
+    """
+    log.info(f"[{state['scan_id']}] Node: regex_prefilter")
+
+    diff = state["diff_content"]
+    hits = []
+
+    added_lines = _extract_added_lines_with_real_line_numbers(diff)
 
     for line_num, line_content, file_path in added_lines:
         for pattern, finding_type, severity in SECRET_PATTERNS:
@@ -352,14 +399,24 @@ def llm_analyzer_node(state: dict) -> dict:
         findings = [f for f in findings if f.get("type") != "VULN_DEPENDENCY"]
 
         # ── Regex-merge safety net ────────────────────────────────────────────
-        # If Mistral returned fewer findings than regex hits, it under-reported.
+        # ALWAYS merge regex hits — never gate this on a raw count comparison.
+        # Comparing len(findings) < len(prefilter_hits) is unreliable: if Mistral
+        # returns N findings that happen to equal the regex hit count but are
+        # actually DIFFERENT findings (e.g. 3 secrets + XSS, missing SQL_INJECTION
+        # and EVAL_INJECTION that regex found), the counts match and the merge
+        # never runs — silently dropping real hits. The merge function itself
+        # does proper line/evidence-based deduplication, so it's always safe
+        # to call unconditionally.
         prefilter_hits = state.get("prefilter_hits", [])
-        if len(findings) < len(prefilter_hits):
-            log.warning(
-                f"[{state['scan_id']}] Mistral returned {len(findings)} findings "
-                f"but regex found {len(prefilter_hits)} hits — merging missing ones"
-            )
+        if prefilter_hits:
+            before_count = len(findings)
             findings = _merge_regex_into_findings(findings, prefilter_hits)
+            if len(findings) > before_count:
+                log.warning(
+                    f"[{state['scan_id']}] Mistral missed {len(findings) - before_count} "
+                    f"regex-confirmed hit(s) — merged them in. "
+                    f"LLM returned {before_count}, regex found {len(prefilter_hits)}."
+                )
             log.info(f"[{state['scan_id']}] After regex merge: {len(findings)} findings")
 
         # ── CVE merge ────────────────────────────────────────────────────────
