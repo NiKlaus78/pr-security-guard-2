@@ -38,11 +38,15 @@ Schema:
 - The flagged pattern is in a comment or documentation string
 - The flagged code is ITSELF a regex/pattern definition used by a security scanner
   (e.g. `re.compile(r'...eval...')`, `Pattern.compile("...")`, a tuple/list entry
-  pairing a regex string with a finding type like "EVAL_INJECTION" or "SQL_INJECTION").
-  This is a security tool's own detection rule, not an actual dangerous function call —
-  words like "eval", "exec", "os.system", "pickle.loads" appearing as literal pattern
-  text are not violations. Look for `re.compile(`, `Pattern.compile(`, or the flagged
-  line being part of a list of (pattern, type, severity) tuples as the signal.
+  pairing a regex string with a finding type like "EVAL_INJECTION" or "SQL_INJECTION"),
+  OR the flagged file is the security scanner's own source/prompt code
+  (paths like agent/nodes.py, agent/graph.py, agent/main.py,
+  agent/prompts/analyzer.py, agent/prompts/critique.py, agent/tools/cve_checker.py)
+  where dangerous-sounding keywords (eval, exec, os.system, pickle.loads,
+  jwt.decode, yaml.load) appear as documentation prose describing what the
+  scanner looks for (e.g. "eval()/exec() with user input", "pickle.loads() on
+  untrusted data") — NOT as actual executable calls. This is a security tool
+  discussing vulnerability patterns as its literal purpose, not a violation.
 
 ### Reduce confidence by 0.20-0.35 when:
 - The file path suggests it's a configuration template or example

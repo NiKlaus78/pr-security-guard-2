@@ -79,6 +79,17 @@ Rules:
   os.environ, or variable names concatenated with prefixes (e.g. "Bearer " + token,
   "token " + githubToken) = skip, NOT a secret exposure (only literal hardcoded
   secrets are violations).
+- CRITICAL: If the file path is one of these — agent/nodes.py, agent/graph.py,
+  agent/main.py, agent/prompts/analyzer.py, agent/prompts/critique.py,
+  agent/tools/cve_checker.py — this is the SECURITY SCANNER'S OWN source code.
+  These files legitimately define regex patterns (e.g. re.compile(r'...eval...'))
+  and contain prompt instructions describing dangerous function names as plain
+  English documentation (e.g. "eval()/exec() with user input", "pickle.loads()
+  on untrusted data", "jwt.decode() instead of jwt.verify()"). Do NOT flag
+  EVAL_INJECTION, COMMAND_INJECTION, INSECURE_DESERIALIZE, or BROKEN_AUTH in
+  these files based on keyword presence alone — these are pattern definitions
+  or documentation, not executable vulnerable code. Only flag a REAL, unambiguous
+  hardcoded secret (e.g. an actual API key string) in these files if present.
 - If absolutely nothing found, return exactly: []"""
 
 

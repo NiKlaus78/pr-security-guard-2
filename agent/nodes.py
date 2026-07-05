@@ -75,6 +75,30 @@ PATTERN_DEFINITION_GUARD = re.compile(
     r'new\s+RegExp\s*\('          # JavaScript: defining a regex
 )
 
+# This security tool's own source and prompt files inherently discuss
+# dangerous function names (eval, pickle.loads, jwt.decode, yaml.load, etc.)
+# as their literal purpose — either as regex pattern definitions or as
+# descriptive prose in LLM prompt instructions ("eval()/exec() with user
+# input", "pickle.loads() on untrusted data"). Scanning these files with
+# DANGEROUS_CALL_PATTERNS is inherently circular and produces false positives
+# every time the tool's own detection logic is modified. SECRET_PATTERNS
+# stays active on these files — a real leaked credential should still be
+# caught regardless of which file it's in.
+SELF_TOOL_FILE_MARKERS = (
+    "agent/nodes.py",
+    "agent/graph.py",
+    "agent/main.py",
+    "agent/prompts/analyzer.py",
+    "agent/prompts/critique.py",
+    "agent/tools/cve_checker.py",
+)
+
+
+def _is_self_tool_file(file_path: str) -> bool:
+    """Returns True if file_path matches one of this tool's own source/prompt files."""
+    normalized = file_path.replace("\\", "/").lower()
+    return any(marker in normalized for marker in SELF_TOOL_FILE_MARKERS)
+
 # Dangerous function-call patterns — language-agnostic safety net.
 # LLM-only findings (SQL injection, eval, deserialization) have no database
 # fact-check like CVEs do, so Mistral under-reports these inconsistently.
@@ -136,13 +160,14 @@ def regex_prefilter_node(state: dict) -> dict:
                 })
                 break  # One hit per line is enough
 
-        # Skip DANGEROUS_CALL_PATTERNS matches on lines that are themselves
-        # defining a regex/pattern (e.g. security-scanner source code) —
-        # these mention keywords like "eval", "exec", "os.system" as literal
-        # pattern text, not as actual dangerous function calls.
+        # Skip DANGEROUS_CALL_PATTERNS on:
+        #  1. Lines that are themselves regex/pattern definitions (re.compile, etc.)
+        #  2. This tool's own source/prompt files, which discuss these keywords
+        #     as their literal purpose (pattern definitions or prompt prose)
         is_pattern_definition = PATTERN_DEFINITION_GUARD.search(line_content)
+        is_self_tool_file = _is_self_tool_file(file_path)
 
-        if not is_pattern_definition:
+        if not is_pattern_definition and not is_self_tool_file:
             for pattern, finding_type, severity in DANGEROUS_CALL_PATTERNS:
                 if pattern.search(line_content):
                     hits.append({
