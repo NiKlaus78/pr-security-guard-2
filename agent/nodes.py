@@ -50,14 +50,22 @@ llm = ChatMistralAI(
 
 # Compiled patterns for speed — only match added lines (starting with +)
 SECRET_PATTERNS = [
-    (re.compile(r'(?i)(password|passwd|pwd)\s*[=:]\s*["\']?[^\s"\']{6,}'), "HARDCODED_PASSWORD", "CRITICAL"),
-    (re.compile(r'(?i)(api[_-]?key|apikey)\s*[=:]\s*["\']?[A-Za-z0-9_\-]{16,}'), "HARDCODED_API_KEY", "CRITICAL"),
+    (re.compile(r'(?i)\w*(password|passwd|pwd)\w*\s*[=:]\s*["\']?[^\s"\']{6,}'), "HARDCODED_PASSWORD", "CRITICAL"),
+    (re.compile(r'(?i)\w*(api[_-]?key|apikey)\w*\s*[=:]\s*["\']?[^\s"\']{16,}'), "HARDCODED_API_KEY", "CRITICAL"),
     (re.compile(r'AKIA[0-9A-Z]{16}'), "AWS_ACCESS_KEY", "CRITICAL"),
     (re.compile(r'(?i)aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*["\']?[A-Za-z0-9/+=]{40}'), "AWS_SECRET_KEY", "CRITICAL"),
     (re.compile(r'sk-[a-zA-Z0-9]{32,}'), "OPENAI_API_KEY", "CRITICAL"),
     (re.compile(r'-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----'), "PRIVATE_KEY", "CRITICAL"),
-    (re.compile(r'(?i)(secret|token)\s*[=:]\s*["\']?[A-Za-z0-9_\-]{16,}'), "HARDCODED_SECRET", "HIGH"),
-    (re.compile(r'jdbc:[a-z]+://[^:]+:[^@]+@'), "DB_CREDENTIALS_IN_URL", "CRITICAL"),
+    # Broadened: matches SECRET_KEY, API_SECRET, AUTH_TOKEN, ACCESS_TOKEN, etc. —
+    # not just a variable literally named "secret" or "token" with nothing else.
+    # Value class widened to accept special characters (@, !, #, etc.) common
+    # in real generated secrets — the old [A-Za-z0-9_\-]{16,} broke on any
+    # secret containing punctuation before reaching 16 consecutive chars.
+    (re.compile(r'(?i)\w*(secret|token)\w*\s*[=:]\s*["\']?[^\s"\']{16,}'), "HARDCODED_SECRET", "HIGH"),
+    # Broadened: covers jdbc:, postgres://, postgresql://, mongodb://, mysql:// —
+    # the previous version only matched "jdbc:" and missed common URL schemes
+    # like "postgresql://" (note the "ql" suffix) and "mongodb://".
+    (re.compile(r'(?i)(jdbc:[a-z]+|postgres(?:ql)?|mongodb(?:\+srv)?|mysql)://[^:\s]+:[^@\s]+@'), "DB_CREDENTIALS_IN_URL", "CRITICAL"),
     (re.compile(r'(?i)ghp_[A-Za-z0-9]{36}'), "GITHUB_TOKEN", "CRITICAL"),
     (re.compile(r'eyJ[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_.+/=]*'), "HARDCODED_JWT", "HIGH"),
 ]
@@ -196,11 +204,13 @@ def regex_prefilter_node(state: dict) -> dict:
 
     for line_num, line_content, file_path in added_lines:
         for pattern, finding_type, severity in SECRET_PATTERNS:
-            if pattern.search(line_content):
+            m = pattern.search(line_content)
+            if m:
                 hits.append({
                     "type": finding_type,
                     "severity": severity,
                     "line_content": line_content.strip(),
+                    "matched_text": m.group(0),
                     "diff_line": line_num,
                     "file": file_path,
                     "source": "regex_prefilter"
@@ -211,16 +221,25 @@ def regex_prefilter_node(state: dict) -> dict:
         #  1. Lines that are themselves regex/pattern definitions (re.compile, etc.)
         #  2. This tool's own source/prompt files, which discuss these keywords
         #     as their literal purpose (pattern definitions or prompt prose)
+        #  3. Comment/docstring lines — e.g. "# HIGH: eval() with user input"
+        #     describing a vulnerability below it. Very common in demo/test
+        #     fixtures and in real code explaining a security decision. Without
+        #     this guard, the comment line itself gets flagged as a separate
+        #     (redundant, wrongly-positioned) finding alongside the real one.
+        stripped = line_content.strip()
+        is_comment_line = stripped.startswith(("#", "//", "/*", "*", "'''", '"""'))
         is_pattern_definition = PATTERN_DEFINITION_GUARD.search(line_content)
         is_self_tool_file = _is_self_tool_file(file_path)
 
-        if not is_pattern_definition and not is_self_tool_file:
+        if not is_pattern_definition and not is_self_tool_file and not is_comment_line:
             for pattern, finding_type, severity in DANGEROUS_CALL_PATTERNS:
-                if pattern.search(line_content):
+                m = pattern.search(line_content)
+                if m:
                     hits.append({
                         "type": finding_type,
                         "severity": severity,
                         "line_content": line_content.strip(),
+                        "matched_text": m.group(0),
                         "diff_line": line_num,
                         "file": file_path,
                         "source": "regex_dangerous_call"
@@ -228,11 +247,13 @@ def regex_prefilter_node(state: dict) -> dict:
                     break
 
         # Check CVV logging
-        if CVV_LOG_PATTERN.search(line_content):
+        cvv_m = CVV_LOG_PATTERN.search(line_content)
+        if cvv_m:
             hits.append({
                 "type": "PCI_DATA_IN_LOGS",
                 "severity": "HIGH",
                 "line_content": line_content.strip(),
+                "matched_text": cvv_m.group(0),
                 "diff_line": line_num,
                 "file": file_path,
                 "source": "regex_prefilter"
@@ -427,6 +448,23 @@ def llm_analyzer_node(state: dict) -> dict:
             findings = _merge_cve_into_findings(findings, cve_findings)
             log.info(f"[{state['scan_id']}] After CVE merge: {len(findings)} findings")
 
+        # ── Final proximity dedup ─────────────────────────────────────────────
+        # Catches cases the evidence-overlap merge above couldn't: when Mistral
+        # heavily paraphrases a finding (e.g. "Unpickling untrusted data..."
+        # instead of quoting "pickle.loads(...)"), no substring overlap exists,
+        # so the regex version gets ADDED as a new entry rather than replacing
+        # the LLM's — leaving two rows (one wrong-lined, one correct) for the
+        # same real issue. This pass collapses same-type/same-file findings
+        # that land within a few lines of each other, preferring the
+        # regex-sourced entry (correct, deterministic line number) when both exist.
+        before_dedup = len(findings)
+        findings = _deduplicate_by_proximity(findings)
+        if len(findings) < before_dedup:
+            log.info(
+                f"[{state['scan_id']}] Proximity dedup removed "
+                f"{before_dedup - len(findings)} near-duplicate finding(s)"
+            )
+
         return {"raw_findings": findings}
 
     except json.JSONDecodeError as e:
@@ -455,12 +493,22 @@ def self_reflection_node(state: dict) -> dict:
             log.info(f"[{state['scan_id']}] No findings to critique.")
             return {"critiqued_findings": []}
 
-        # Filter out ground-truth CVE findings from the ones we send to LLM for critique
-        findings_to_critique = [f for f in raw_findings if f.get("type") != "VULN_DEPENDENCY"]
+        # Filter out ground-truth findings from the ones we send to LLM for critique:
+        #  - VULN_DEPENDENCY: factual OSV database lookups, not LLM guesses
+        #  - regex-sourced findings (finding_id starts with "regex_"): deterministic
+        #    pattern matches (secrets, eval/exec, pickle.loads, SQL injection, CVV
+        #    logging). Sending these through LLM critique risks Mistral inconsistently
+        #    discarding legitimate, provably-correct detections as false positives —
+        #    the same reasoning that already applies to CVE findings applies here.
+        findings_to_critique = [
+            f for f in raw_findings
+            if f.get("type") != "VULN_DEPENDENCY"
+            and not str(f.get("finding_id", "")).startswith("regex_")
+        ]
 
         critique_map = {}
         if findings_to_critique:
-            log.info(f"[{state['scan_id']}] Critiquing {len(findings_to_critique)} non-CVE findings...")
+            log.info(f"[{state['scan_id']}] Critiquing {len(findings_to_critique)} non-CVE, non-regex findings...")
             user_prompt = build_critique_user_prompt(
                 findings=findings_to_critique,
                 diff_content=state["diff_content"]
@@ -484,7 +532,7 @@ def self_reflection_node(state: dict) -> dict:
             except Exception as e:
                 log.error(f"[{state['scan_id']}] Self-reflection LLM call failed: {e}")
         else:
-            log.info(f"[{state['scan_id']}] No non-CVE findings to critique. Skipping critique LLM.")
+            log.info(f"[{state['scan_id']}] No non-CVE, non-regex findings to critique. Skipping critique LLM.")
 
         critiqued = []
         for finding in raw_findings:
@@ -499,6 +547,18 @@ def self_reflection_node(state: dict) -> dict:
                     "final_confidence": finding.get("confidence", 0.97),
                     "critique_verdict": "CONFIRMED",
                     "critique_rationale": "Factual CVE finding from OSV database — skipped critique."
+                })
+            elif str(fid).startswith("regex_"):
+                # Deterministic regex-confirmed finding — auto-confirm, skip LLM critique.
+                # Bypassing critique guarantees these are never inconsistently discarded
+                # across runs, and keeps our own correctly-computed line/file authoritative.
+                confidence = finding.get("confidence", 0.85)
+                critiqued.append({
+                    **finding,
+                    "initial_confidence": confidence,
+                    "final_confidence": confidence,
+                    "critique_verdict": "CONFIRMED",
+                    "critique_rationale": "Deterministic regex pattern match — skipped critique."
                 })
             else:
                 critique = critique_map.get(fid, {})
@@ -592,6 +652,66 @@ def gate_decision_node(state: dict) -> dict:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+def _deduplicate_by_proximity(findings: list, line_window: int = 15) -> list:
+    """
+    Collapses findings that are almost certainly duplicates of the same real
+    issue: same type, same file, and within `line_window` lines of each other.
+
+    This is a safety-net pass for cases the evidence-overlap merge can't catch
+    — specifically when Mistral paraphrases a finding so differently from the
+    regex hit's raw line content that no substring overlap exists (e.g.
+    describing pickle.loads() as "unpickling untrusted data" instead of
+    quoting the call). When a group of near-duplicates is found, prefer:
+      1. A regex-sourced entry (finding_id starts with "regex_") — its line
+         number is deterministically correct via diff-hunk parsing.
+      2. Otherwise, the one with the highest confidence.
+    """
+    if len(findings) <= 1:
+        return findings
+
+    groups: list[list[dict]] = []
+    used = [False] * len(findings)
+
+    for i, f in enumerate(findings):
+        if used[i]:
+            continue
+        group = [f]
+        used[i] = True
+        f_type = f.get("type", "")
+        f_file = f.get("file", "unknown")
+        f_line = f.get("line", -1)
+
+        for j in range(i + 1, len(findings)):
+            if used[j]:
+                continue
+            g = findings[j]
+            if (
+                g.get("type", "") == f_type
+                and g.get("file", "unknown") == f_file
+                and f_line >= 0 and g.get("line", -1) >= 0
+                and abs(g.get("line", -1) - f_line) <= line_window
+            ):
+                group.append(g)
+                used[j] = True
+
+        groups.append(group)
+
+    deduped = []
+    for group in groups:
+        if len(group) == 1:
+            deduped.append(group[0])
+            continue
+
+        # Prefer a regex-sourced entry (deterministic, correct line number)
+        regex_entries = [f for f in group if str(f.get("finding_id", "")).startswith("regex_")]
+        if regex_entries:
+            deduped.append(max(regex_entries, key=lambda f: f.get("confidence", 0)))
+        else:
+            deduped.append(max(group, key=lambda f: f.get("confidence", 0)))
+
+    return deduped
+
+
 def _merge_cve_into_findings(llm_findings: list, cve_findings: list) -> list:
     """
     Merges confirmed OSV CVE findings into the LLM findings list.
@@ -626,48 +746,85 @@ def _merge_cve_into_findings(llm_findings: list, cve_findings: list) -> list:
 def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list:
     """
     Merges regex prefilter hits into LLM findings.
-    Only adds hits that aren't already represented in LLM findings
-    (matched by line number or evidence content similarity).
-    Ensures we never lose a confirmed regex detection due to LLM under-reporting.
+
+    Two cases per regex hit:
+      1. No overlapping LLM finding exists → ADD the regex finding (new detection).
+      2. An overlapping LLM finding exists (same secret/call, evidence-matched)
+         → REPLACE it with the regex version instead of just skipping.
+
+    Why replace instead of skip: our regex line number is computed via proper
+    unified-diff hunk parsing and is provably correct, whereas the LLM's own
+    self-reported "line" field is frequently wrong (LLMs are unreliable at
+    precise line-counting over more than a few dozen lines — commonly off by
+    a consistent offset, e.g. miscounting past a docstring or blank lines).
+    Replacing guarantees the final report always shows the correct line/file,
+    regardless of what line number Mistral guessed.
     """
     merged = list(llm_findings)
 
-    # Build a set of evidence strings already in LLM findings (lowercased for fuzzy match)
-    existing_evidence = {
-        f.get("evidence", "").lower()[:80]
-        for f in llm_findings
+    severity_confidence = {
+        "CRITICAL": 0.93,
+        "HIGH": 0.88,
+        "MEDIUM": 0.70,
+        "LOW": 0.50,
     }
-    existing_lines = {f.get("line", -1) for f in llm_findings}
 
     for i, hit in enumerate(prefilter_hits):
         line_content_lower = hit["line_content"].lower()[:80]
+        matched_text_lower = hit.get("matched_text", "").lower().strip()
+        hit_file = hit.get("file", "unknown")
         diff_line = hit.get("diff_line", 0)
 
-        # Skip if already captured by LLM (same line or very similar evidence)
-        already_covered = (
-            diff_line in existing_lines or
-            any(line_content_lower in ev or ev in line_content_lower
-                for ev in existing_evidence if len(ev) > 10)
-        )
+        regex_finding = {
+            "finding_id": f"regex_{i:03d}",
+            "severity": hit["severity"],
+            "type": hit["type"],
+            "file": hit_file,
+            "line": diff_line,
+            "evidence": hit["line_content"][:200],
+            "confidence": severity_confidence.get(hit["severity"], 0.75),
+            "policy_ref": "SEC-001",
+            "remediation": "Move to environment variables or a secrets manager (e.g. AWS Secrets Manager, Vault)."
+        }
 
-        if not already_covered:
-            severity_confidence = {
-                "CRITICAL": 0.93,
-                "HIGH": 0.88,
-                "MEDIUM": 0.70,
-                "LOW": 0.50,
-            }
-            merged.append({
-                "finding_id": f"regex_{i:03d}",
-                "severity": hit["severity"],
-                "type": hit["type"],
-                "file": hit.get("file", "unknown"),
-                "line": diff_line,
-                "evidence": hit["line_content"][:200],
-                "confidence": severity_confidence.get(hit["severity"], 0.75),
-                "policy_ref": "SEC-001",
-                "remediation": "Move to environment variables or a secrets manager (e.g. AWS Secrets Manager, Vault)."
-            })
+        # Look for an existing LLM finding that overlaps this same hit.
+        #
+        # Two ways to detect overlap, BOTH gated on matching "type" and "file"
+        # first (to avoid false collisions between unrelated findings):
+        #   1. Full-line substring overlap (works when Mistral quotes the
+        #      line close to verbatim)
+        #   2. matched_text overlap (e.g. "eval(", "pickle.loads(") — catches
+        #      cases where Mistral PARAPHRASES the evidence in its own words
+        #      (e.g. "Using eval() on user input allows RCE" instead of
+        #      quoting "risk_score = eval(formula)" directly). Gating on
+        #      type+file keeps this safe from unrelated false matches, since
+        #      matched_text alone (e.g. "eval(") is too generic on its own.
+        overlap_index = None
+        for idx, f in enumerate(merged):
+            same_type = f.get("type", "") == hit["type"]
+            same_file = f.get("file", "unknown") in (hit_file, "unknown") or hit_file == "unknown"
+            if not (same_type and same_file):
+                continue
+
+            existing_ev = f.get("evidence", "").lower()[:200]
+
+            full_line_overlap = (
+                len(existing_ev) > 10 and
+                (line_content_lower in existing_ev or existing_ev in line_content_lower)
+            )
+            signature_overlap = (
+                len(matched_text_lower) >= 4 and matched_text_lower in existing_ev
+            )
+
+            if full_line_overlap or signature_overlap:
+                overlap_index = idx
+                break
+
+        if overlap_index is not None:
+            # Replace — regex-computed line/file wins over the LLM's guess
+            merged[overlap_index] = regex_finding
+        else:
+            merged.append(regex_finding)
 
     return merged
 
