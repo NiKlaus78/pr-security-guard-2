@@ -7,7 +7,7 @@ public class PaymentService {
     private static final String DB_PASS = "MyBank@Prod2024!";
 
     public void processPayment(String accountId) {
-        // SQL injection - should be caught
+        // SQL injection
         String query = "SELECT * FROM accounts WHERE id = " + accountId;
     }
 }
