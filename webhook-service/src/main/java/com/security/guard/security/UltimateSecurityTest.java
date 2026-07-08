@@ -12,7 +12,7 @@ import org.apache.logging.log4j.LogManager;
 public class UltimateSecurityTest {
 
     // ── CRITICAL: Hardcoded Secrets ──────────────────────────────────────────
-    private static final String API_KEY        = "sk-live-xK9mP2qR4nL8vT7wY3uA";
+    private static final String API_KEY        = "xK9mP2qR4nL8vT7wY3uA";
     private static final String OPENAI_KEY     = "sk-proj-T3BlbkFJabc123def456";
     private static final String AWS_ACCESS     = "AKIAIOSFODNN7EXAMPLE";
     private static final String AWS_SECRET     = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
