@@ -265,6 +265,29 @@ def regex_prefilter_node(state: dict) -> dict:
 
 # ── Node 2: CVE Scanner ────────────────────────────────────────────────────────
 
+def _manifest_actually_in_diff(diff_content: str, filename: str) -> bool:
+    """
+    Checks whether `filename` is ACTUALLY being changed in this diff — i.e.
+    appears in a real "diff --git a/.../filename b/.../filename" header —
+    rather than merely appearing as a substring anywhere in the diff text.
+
+    Without this check, a naive `if "pom.xml" in diff` matches even when the
+    only occurrence is prose in an unrelated file (e.g. a README.md that
+    mentions "pom.xml", "package.json", "requirements.txt" in its own
+    documentation, as this very project's README does). That false match
+    then causes a doomed fetch attempt for a guessed root-level path that
+    doesn't exist, and the CVE scan silently does nothing for the ACTUAL
+    file that changed.
+    """
+    for line in diff_content.split("\n"):
+        if line.startswith("diff --git") and filename in line:
+            parts = line.split()
+            for p in parts:
+                if p.startswith("b/") and p.endswith(filename):
+                    return True
+    return False
+
+
 def cve_scanner_node(state: dict) -> dict:
     """
     Scans dependency manifests for known CVEs via OSV API.
@@ -283,16 +306,8 @@ def cve_scanner_node(state: dict) -> dict:
 
     # ── Maven: pom.xml (BOM resolution + transitive expansion happens inside) ──
     pom_xml_content = state.get("pom_xml_content", "")
-    if "pom.xml" in diff:
-        pom_path = "pom.xml"
-        for line in diff.split("\n"):
-            if line.startswith("diff --git") and "pom.xml" in line:
-                parts = line.split()
-                for p in parts:
-                    if p.startswith("b/") and p.endswith("pom.xml"):
-                        pom_path = p[2:]
-                        break
-                break
+    if _manifest_actually_in_diff(diff, "pom.xml"):
+        pom_path = _extract_manifest_path(diff, "pom.xml")
         log.info(f"[{state['scan_id']}] pom.xml path in repo: {pom_path}")
 
         if pom_xml_content:
@@ -309,10 +324,12 @@ def cve_scanner_node(state: dict) -> dict:
             dep["pom_path"] = pom_path
             dep["manifest_path"] = pom_path
         all_dependencies.extend(deps)
+    else:
+        log.debug(f"[{state['scan_id']}] pom.xml not actually changed in this diff — skipping")
 
     # ── npm: package.json ───────────────────────────────────────────────────
     package_json_content = state.get("package_json_content", "")
-    if "package.json" in diff:
+    if _manifest_actually_in_diff(diff, "package.json"):
         pkg_path = _extract_manifest_path(diff, "package.json")
         log.info(f"[{state['scan_id']}] package.json detected at '{pkg_path}'")
         if package_json_content:
@@ -322,10 +339,12 @@ def cve_scanner_node(state: dict) -> dict:
             all_dependencies.extend(deps)
         else:
             log.warning(f"[{state['scan_id']}] Full package.json unavailable — skipping npm CVE scan")
+    else:
+        log.debug(f"[{state['scan_id']}] package.json not actually changed in this diff — skipping")
 
     # ── PyPI: requirements.txt ──────────────────────────────────────────────
     requirements_content = state.get("requirements_txt_content", "")
-    if "requirements.txt" in diff:
+    if _manifest_actually_in_diff(diff, "requirements.txt"):
         req_path = _extract_manifest_path(diff, "requirements.txt")
         log.info(f"[{state['scan_id']}] requirements.txt detected at '{req_path}'")
         if requirements_content:
@@ -335,6 +354,8 @@ def cve_scanner_node(state: dict) -> dict:
             all_dependencies.extend(deps)
         else:
             log.warning(f"[{state['scan_id']}] Full requirements.txt unavailable — skipping PyPI CVE scan")
+    else:
+        log.debug(f"[{state['scan_id']}] requirements.txt not actually changed in this diff — skipping")
 
     if not all_dependencies:
         log.info(f"[{state['scan_id']}] No dependency manifests found in diff — skipping CVE scan")
