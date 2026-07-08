@@ -10,6 +10,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from graph import build_security_graph
@@ -21,6 +22,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s"
 )
+# Enable DEBUG for CVE checker so we can see exactly what OSV returns
+logging.getLogger("tools.cve_checker").setLevel(logging.DEBUG)
 log = logging.getLogger(__name__)
 
 
@@ -34,6 +37,9 @@ class ScanRequest(BaseModel):
     pr_author: str
     pr_title: str
     diff_content: str
+    pom_xml_content: str = ""               # Full pom.xml content when present in diff
+    package_json_content: str = ""          # Full package.json content when present in diff
+    requirements_txt_content: str = ""      # Full requirements.txt content when present in diff
 
 
 class ScanResponse(BaseModel):
@@ -100,6 +106,11 @@ async def scan_pr(request: ScanRequest):
             "pr_author": request.pr_author,
             "pr_title": request.pr_title,
             "diff_content": request.diff_content,
+            "prefilter_hits": [],
+            "cve_findings": [],
+            "pom_xml_content": request.pom_xml_content,
+            "package_json_content": request.package_json_content,
+            "requirements_txt_content": request.requirements_txt_content,
             "raw_findings": [],
             "critiqued_findings": [],
             "final_findings": [],
@@ -137,6 +148,17 @@ async def scan_pr(request: ScanRequest):
 @app.get("/health")
 async def health():
     return {"status": "UP", "service": "pr-security-guard-agent"}
+
+
+@app.get("/presentation")
+async def get_presentation():
+    import os
+    path = "/app/pr-security-guard-presentation.html"
+    if not os.path.exists(path):
+        path = "pr-security-guard-presentation.html"
+    with open(path, "r", encoding="utf-8") as f:
+        content = f.read()
+    return HTMLResponse(content=content)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -1,8 +1,11 @@
 """
 LangGraph Security Pipeline
 
-Defines the agent graph with 4 sequential nodes:
-  regex_prefilter → llm_analyzer → self_reflection → gate_decision
+Defines the agent graph with 5 sequential nodes:
+  regex_prefilter → dependency_scanner → llm_analyzer → self_reflection → gate_decision
+
+dependency_scanner covers Maven (pom.xml), npm (package.json), and
+PyPI (requirements.txt) — detected independently per PR diff.
 
 State flows through each node, accumulating findings.
 LangSmith tracing is attached at the graph level.
@@ -14,6 +17,7 @@ from typing import TypedDict, List, Any
 
 from nodes import (
     regex_prefilter_node,
+    dependency_scanner_node,
     llm_analyzer_node,
     self_reflection_node,
     gate_decision_node
@@ -31,9 +35,13 @@ class SecurityScanState(TypedDict):
     pr_author: str
     pr_title: str
     diff_content: str
+    pom_xml_content: str               # Full pom.xml content when present in diff
+    package_json_content: str          # Full package.json content when present in diff
+    requirements_txt_content: str      # Full requirements.txt content when present in diff
 
     # Pipeline outputs (accumulate through nodes)
     prefilter_hits: List[dict]       # Fast regex hits
+    cve_findings: List[dict]          # OSV vulnerability scan results (CVEs) — Maven/npm/PyPI
     raw_findings: List[dict]          # LLM initial findings
     critiqued_findings: List[dict]    # After self-reflection
     final_findings: List[dict]        # After gate decision (with gate_action set)
@@ -60,10 +68,13 @@ def build_security_graph():
       regex_prefilter          Fast pattern matching, no LLM cost
            │
            ▼
-      llm_analyzer             Claude Sonnet deep semantic analysis
+      dependency_scanner       OSV.dev CVE lookup for added dependencies
            │
            ▼
-      self_reflection          Claude Sonnet critiques its own findings
+      llm_analyzer             Mistral Codestral deep semantic analysis
+           │
+           ▼
+      self_reflection          Mistral Codestral critiques its own findings
            │
            ▼
       gate_decision            Applies confidence thresholds, sets BLOCK/WARN/ALLOW
@@ -75,13 +86,15 @@ def build_security_graph():
 
     # Register nodes
     builder.add_node("regex_prefilter", regex_prefilter_node)
+    builder.add_node("dependency_scanner", dependency_scanner_node)
     builder.add_node("llm_analyzer", llm_analyzer_node)
     builder.add_node("self_reflection", self_reflection_node)
     builder.add_node("gate_decision", gate_decision_node)
 
     # Wire the linear pipeline
     builder.set_entry_point("regex_prefilter")
-    builder.add_edge("regex_prefilter", "llm_analyzer")
+    builder.add_edge("regex_prefilter", "dependency_scanner")
+    builder.add_edge("dependency_scanner", "llm_analyzer")
     builder.add_edge("llm_analyzer", "self_reflection")
     builder.add_edge("self_reflection", "gate_decision")
     builder.add_edge("gate_decision", END)

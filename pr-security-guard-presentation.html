@@ -1,0 +1,1277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PR Security Guard — Presentation</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;500;600&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --black:#0A0A0F;--surface:#111118;--panel:#16161F;--border:#242430;--border-b:#2E2E3C;
+  --red:#FF3B5C;--red-d:#2A1018;--red-m:#FF1F44;
+  --amber:#FFB347;--amber-d:#1E1508;
+  --green:#00E5A0;--green-d:#001A12;
+  --blue:#4D9EFF;--blue-d:#081528;
+  --text:#E8E8F0;--muted:#7070A0;--dim:#404060;
+  --mono:'IBM Plex Mono',monospace;
+  --sans:'IBM Plex Sans',sans-serif;
+  --display:'Syne',sans-serif;
+}
+html,body{height:100%;overflow:hidden;background:var(--black);color:var(--text);font-family:var(--sans)}
+
+/* SLIDE ENGINE */
+.deck{position:fixed;inset:0;display:flex;flex-direction:column}
+.slides{flex:1;position:relative;overflow:hidden}
+.slide{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:center;align-items:center;padding:3rem;opacity:0;transform:translateX(60px);transition:opacity .5s ease,transform .5s ease;pointer-events:none}
+.slide.active{opacity:1;transform:translateX(0);pointer-events:all}
+.slide.out{opacity:0;transform:translateX(-60px)}
+
+/* NAV */
+.nav{display:flex;align-items:center;justify-content:space-between;padding:.9rem 2rem;border-top:1px solid var(--border);flex-shrink:0;background:var(--surface)}
+.nav-dots{display:flex;gap:6px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--dim);cursor:pointer;transition:background .2s,transform .2s}
+.dot.active{background:var(--red);transform:scale(1.4)}
+.nav-btn{background:none;border:1px solid var(--border);color:var(--muted);padding:.45rem 1.1rem;border-radius:5px;cursor:pointer;font-family:var(--mono);font-size:.7rem;letter-spacing:.08em;transition:all .15s}
+.nav-btn:hover{border-color:var(--border-b);color:var(--text)}
+.slide-counter{font-family:var(--mono);font-size:.7rem;color:var(--dim)}
+
+/* TYPOGRAPHY */
+.eyebrow{font-family:var(--mono);font-size:.62rem;color:var(--red);letter-spacing:.18em;text-transform:uppercase;margin-bottom:.7rem}
+.big-title{font-family:var(--display);font-size:clamp(2.2rem,5vw,4rem);font-weight:800;line-height:1.05;letter-spacing:-.02em}
+.big-title span{color:var(--red)}
+.subtitle{font-size:.95rem;color:var(--muted);line-height:1.7;max-width:620px;margin-top:.8rem}
+.section-title{font-family:var(--display);font-size:1.8rem;font-weight:800;text-align:center;letter-spacing:-.02em;margin-bottom:.4rem}
+.section-sub{font-size:.85rem;color:var(--muted);text-align:center;margin-bottom:2rem}
+
+/* CARDS */
+.card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1.25rem}
+.card-grid{display:grid;gap:.75rem;width:100%}
+.card-grid.cols-3{grid-template-columns:repeat(3,1fr)}
+.card-grid.cols-2{grid-template-columns:repeat(2,1fr)}
+.card-title{font-family:var(--mono);font-size:.72rem;font-weight:600;margin-bottom:.4rem;letter-spacing:.04em}
+.card-body{font-size:.78rem;color:var(--muted);line-height:1.6}
+.card-tag{display:inline-block;font-family:var(--mono);font-size:.58rem;padding:.15rem .5rem;border-radius:3px;margin-top:.5rem;letter-spacing:.06em}
+.tag-red{background:var(--red-d);color:var(--red)}
+.tag-green{background:var(--green-d);color:var(--green)}
+.tag-blue{background:var(--blue-d);color:var(--blue)}
+.tag-amber{background:var(--amber-d);color:var(--amber)}
+
+/* HERO */
+#s0{background:var(--black)}
+.hero-grid{display:grid;grid-template-columns:1fr 1fr;gap:3rem;width:100%;max-width:1000px;align-items:center}
+.scanner{width:320px;height:320px;position:relative}
+.scanner-ring{position:absolute;inset:0;border:1px solid var(--border);border-radius:50%}
+.scanner-ring:nth-child(2){inset:20px;border-color:rgba(255,59,92,.3);animation:pulse-ring 2s ease-in-out infinite}
+.scanner-ring:nth-child(3){inset:50px;border-color:rgba(255,59,92,.2);animation:pulse-ring 2s ease-in-out infinite .3s}
+.scanner-ring:nth-child(4){inset:80px;border-color:rgba(255,59,92,.15);animation:pulse-ring 2s ease-in-out infinite .6s}
+.scanner-center{position:absolute;inset:110px;background:var(--red-d);border-radius:50%;display:flex;align-items:center;justify-content:center;border:1px solid var(--red)}
+.scanner-icon{font-size:2.5rem;animation:scan-pulse 2s ease-in-out infinite}
+.scanner-line{position:absolute;left:50%;top:50%;width:140px;height:1px;background:linear-gradient(to right,transparent,var(--red));transform-origin:left center;animation:scanner-sweep 3s linear infinite}
+@keyframes pulse-ring{0%,100%{opacity:.4}50%{opacity:1}}
+@keyframes scan-pulse{0%,100%{transform:scale(1)}50%{transform:scale(1.1)}}
+@keyframes scanner-sweep{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}
+.hero-stats{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-top:1.5rem}
+.stat{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.75rem}
+.stat-num{font-family:var(--display);font-size:1.6rem;font-weight:800;color:var(--red)}
+.stat-lbl{font-size:.7rem;color:var(--muted);margin-top:.1rem}
+
+/* PROBLEM */
+#s1 .problem-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;width:100%;max-width:900px}
+.problem-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1.5rem;position:relative;overflow:hidden}
+.problem-card::before{content:'';position:absolute;top:0;left:0;right:0;height:2px}
+.problem-card.crit::before{background:var(--red)}
+.problem-card.high::before{background:var(--amber)}
+.problem-card.med::before{background:var(--blue)}
+.problem-num{font-family:var(--display);font-size:3rem;font-weight:800;opacity:.08;position:absolute;top:.5rem;right:1rem}
+.problem-icon{font-size:1.8rem;margin-bottom:.75rem}
+.problem-title{font-weight:600;font-size:.9rem;margin-bottom:.4rem}
+.problem-desc{font-size:.78rem;color:var(--muted);line-height:1.6}
+.code-snippet{background:#0D0D12;border:1px solid var(--border);border-radius:4px;padding:.6rem .75rem;font-family:var(--mono);font-size:.65rem;color:var(--muted);margin-top:.75rem;line-height:1.7}
+.code-snippet .bad{color:var(--red)}
+.code-snippet .ok{color:var(--green)}
+
+/* SOLUTION */
+#s2 .flow{display:flex;align-items:center;gap:0;width:100%;max-width:900px;margin-bottom:2rem}
+.flow-step{flex:1;text-align:center;padding:1rem .5rem;position:relative}
+.flow-step::after{content:'→';position:absolute;right:-10px;top:50%;transform:translateY(-50%);color:var(--dim);font-size:1.2rem}
+.flow-step:last-child::after{display:none}
+.flow-icon{width:56px;height:56px;border-radius:50%;margin:0 auto .6rem;display:flex;align-items:center;justify-content:center;font-size:1.4rem;border:1px solid}
+.flow-label{font-size:.72rem;font-weight:600;font-family:var(--mono)}
+.flow-sub{font-size:.65rem;color:var(--muted);margin-top:.2rem}
+.flow-step.blue .flow-icon{background:var(--blue-d);border-color:var(--blue);color:var(--blue)}
+.flow-step.amber .flow-icon{background:var(--amber-d);border-color:var(--amber);color:var(--amber)}
+.flow-step.red .flow-icon{background:var(--red-d);border-color:var(--red);color:var(--red)}
+.flow-step.green .flow-icon{background:var(--green-d);border-color:var(--green);color:var(--green)}
+.outcome-row{display:flex;gap:1rem;width:100%;max-width:900px}
+.outcome{flex:1;border-radius:8px;padding:1rem;border:1px solid}
+.outcome.block{background:var(--red-d);border-color:var(--red)}
+.outcome.warn{background:var(--amber-d);border-color:var(--amber)}
+.outcome.allow{background:var(--green-d);border-color:var(--green)}
+.outcome-label{font-family:var(--mono);font-size:.75rem;font-weight:600}
+.outcome.block .outcome-label{color:var(--red)}
+.outcome.warn .outcome-label{color:var(--amber)}
+.outcome.allow .outcome-label{color:var(--green)}
+.outcome-desc{font-size:.75rem;color:var(--muted);margin-top:.3rem}
+
+/* HLD */
+#s3 .hld{width:100%;max-width:1000px}
+.hld-arch{display:grid;grid-template-columns:1fr auto 1fr auto 1fr;gap:0;align-items:center;margin-bottom:1.5rem}
+.arch-service{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1rem;text-align:center}
+.arch-service .arch-name{font-family:var(--mono);font-size:.72rem;font-weight:600;margin-bottom:.25rem}
+.arch-service .arch-tech{font-size:.65rem;color:var(--muted)}
+.arch-service .arch-icon{font-size:1.5rem;margin-bottom:.4rem;display:block}
+.arch-arrow{text-align:center;color:var(--dim);font-size:1.4rem;padding:0 .5rem}
+.arch-service.spring{border-color:var(--blue);background:var(--blue-d)}
+.arch-service.python{border-color:var(--amber);background:var(--amber-d)}
+.arch-service.db{border-color:var(--green);background:var(--green-d)}
+.arch-service .arch-name.blue{color:var(--blue)}
+.arch-service .arch-name.amber{color:var(--amber)}
+.arch-service .arch-name.green{color:var(--green)}
+.hld-externals{display:grid;grid-template-columns:repeat(5,1fr);gap:.5rem}
+.ext-chip{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.6rem .5rem;text-align:center;font-size:.65rem;color:var(--muted)}
+.ext-chip .ext-name{font-family:var(--mono);font-size:.62rem;color:var(--text);display:block;margin-top:.2rem}
+
+/* FLOW */
+#s4 .pipeline{display:flex;flex-direction:column;gap:0;width:100%;max-width:860px}
+.pipe-stage{display:grid;grid-template-columns:160px 1fr;gap:0;position:relative}
+.pipe-label{padding:1.2rem 1.5rem 1.2rem 0;display:flex;flex-direction:column;align-items:flex-end;gap:.2rem;border-right:2px solid var(--border);position:relative}
+.pipe-label::after{content:'';position:absolute;right:-6px;top:50%;transform:translateY(-50%);width:10px;height:10px;border-radius:50%}
+.pipe-stage.s1 .pipe-label::after{background:var(--blue);box-shadow:0 0 8px var(--blue)}
+.pipe-stage.s2 .pipe-label::after{background:var(--amber);box-shadow:0 0 8px var(--amber)}
+.pipe-stage.s3 .pipe-label::after{background:var(--red);box-shadow:0 0 8px var(--red)}
+.pipe-stage.s4 .pipe-label::after{background:var(--green);box-shadow:0 0 8px var(--green)}
+.pipe-stage.s5 .pipe-label::after{background:var(--text)}
+.pipe-num{font-family:var(--mono);font-size:.58rem;color:var(--dim)}
+.pipe-name{font-family:var(--display);font-size:.72rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em}
+.pipe-stage.s1 .pipe-name{color:var(--blue)}
+.pipe-stage.s2 .pipe-name{color:var(--amber)}
+.pipe-stage.s3 .pipe-name{color:var(--red)}
+.pipe-stage.s4 .pipe-name{color:var(--green)}
+.pipe-content{padding:1rem 0 1rem 1.5rem;display:flex;gap:.5rem;flex-wrap:wrap}
+.pipe-chip{background:var(--surface);border:1px solid var(--border);border-radius:5px;padding:.45rem .75rem;font-size:.72rem}
+.pipe-chip strong{display:block;font-family:var(--mono);font-size:.65rem;margin-bottom:.15rem}
+.pipe-chip span{color:var(--muted);font-size:.68rem}
+.pipe-connector{padding:.15rem 0 .15rem 158px}
+.pipe-connector-line{width:2px;height:20px;background:var(--border);margin-left:2px}
+
+/* TECH STACK */
+#s5 .tech-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:.75rem;width:100%;max-width:900px}
+.tech-card{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1rem 1.25rem;border-top:2px solid}
+.tech-card.java{border-top-color:var(--red)}
+.tech-card.python{border-top-color:var(--amber)}
+.tech-card.mistral{border-top-color:var(--blue)}
+.tech-card.langgraph{border-top-color:var(--green)}
+.tech-card.osv{border-top-color:#A78BFA}
+.tech-card.docker{border-top-color:#38BDF8}
+.tech-name{font-family:var(--display);font-size:.9rem;font-weight:700;margin-bottom:.25rem}
+.tech-role{font-family:var(--mono);font-size:.6rem;color:var(--muted);margin-bottom:.5rem;letter-spacing:.06em}
+.tech-why{font-size:.75rem;color:var(--muted);line-height:1.6}
+.tech-badge{display:inline-block;font-family:var(--mono);font-size:.55rem;padding:.12rem .45rem;border-radius:3px;background:var(--surface);border:1px solid var(--border);color:var(--muted);margin-top:.4rem}
+
+/* SELF REFLECTION */
+#s6 .loop-wrap{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;width:100%;max-width:900px;align-items:start}
+.loop-steps{display:flex;flex-direction:column;gap:.5rem}
+.loop-step{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.9rem 1rem;display:flex;gap:.75rem;align-items:flex-start}
+.loop-step-num{font-family:var(--display);font-size:1.4rem;font-weight:800;color:var(--border-b);flex-shrink:0;line-height:1}
+.loop-step-info .ls-title{font-family:var(--mono);font-size:.68rem;color:var(--green);font-weight:600;margin-bottom:.2rem}
+.loop-step-info .ls-body{font-size:.73rem;color:var(--muted);line-height:1.5}
+.confidence-demo{background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1.25rem}
+.conf-title{font-family:var(--mono);font-size:.65rem;color:var(--muted);margin-bottom:.75rem;letter-spacing:.08em}
+.conf-row{margin-bottom:.85rem}
+.conf-row-head{display:flex;justify-content:space-between;font-size:.72rem;margin-bottom:.3rem}
+.conf-row-head .finding-name{color:var(--text)}
+.conf-row-head .verdict{font-family:var(--mono);font-size:.62rem}
+.verdict.confirmed{color:var(--red)}
+.verdict.fp{color:var(--green)}
+.conf-track{height:6px;background:var(--border);border-radius:3px;overflow:visible;position:relative}
+.conf-fill{height:100%;border-radius:3px;position:relative;transition:width .8s ease}
+.conf-before{background:var(--dim)}
+.conf-after-bar{position:absolute;top:0;left:0;height:100%;border-radius:3px}
+.conf-fill.red .conf-after-bar{background:var(--red)}
+.conf-fill.green .conf-after-bar{background:var(--green)}
+.conf-labels{display:flex;justify-content:space-between;font-family:var(--mono);font-size:.6rem;color:var(--dim);margin-top:.25rem}
+
+/* CVE */
+#s7 .cve-layout{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;width:100%;max-width:900px;align-items:start}
+.cve-flow{display:flex;flex-direction:column;gap:.5rem}
+.cve-step{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.85rem 1rem;position:relative}
+.cve-step::before{content:'';position:absolute;left:-1px;top:0;bottom:0;width:3px;border-radius:3px 0 0 3px}
+.cve-step.s1::before{background:var(--blue)}
+.cve-step.s2::before{background:var(--amber)}
+.cve-step.s3::before{background:var(--red)}
+.cve-step-title{font-family:var(--mono);font-size:.68rem;font-weight:600;margin-bottom:.2rem}
+.cve-step.s1 .cve-step-title{color:var(--blue)}
+.cve-step.s2 .cve-step-title{color:var(--amber)}
+.cve-step.s3 .cve-step-title{color:var(--red)}
+.cve-step-body{font-size:.73rem;color:var(--muted);line-height:1.5}
+.cve-findings{display:flex;flex-direction:column;gap:.5rem}
+.cve-finding{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.85rem 1rem;display:flex;justify-content:space-between;align-items:center}
+.cve-dep{font-family:var(--mono);font-size:.65rem;color:var(--text)}
+.cve-dep span{color:var(--muted)}
+.cve-badge{font-family:var(--mono);font-size:.6rem;padding:.2rem .5rem;border-radius:3px}
+.badge-crit{background:var(--red-d);color:var(--red)}
+.badge-high{background:var(--amber-d);color:var(--amber)}
+.badge-med{background:var(--blue-d);color:var(--blue)}
+.cve-osv{background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:.85rem 1rem;font-size:.72rem;color:var(--muted)}
+.cve-osv strong{color:var(--green);font-family:var(--mono);font-size:.65rem}
+
+/* MULTI REPO */
+#s8 .multi-layout{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;width:100%;max-width:900px}
+.repo-list{display:flex;flex-direction:column;gap:.5rem}
+.repo-row{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.75rem 1rem;display:flex;align-items:center;gap:.75rem}
+.repo-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.repo-name{font-family:var(--mono);font-size:.72rem;color:var(--text)}
+.repo-status{margin-left:auto;font-family:var(--mono);font-size:.6rem;padding:.15rem .45rem;border-radius:3px}
+.status-active{background:var(--green-d);color:var(--green)}
+.status-add{background:var(--blue-d);color:var(--blue)}
+.steps-list{display:flex;flex-direction:column;gap:.5rem}
+.step-row{display:flex;gap:.75rem;align-items:flex-start}
+.step-bubble{width:22px;height:22px;border-radius:50%;background:var(--panel);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.62rem;color:var(--muted);flex-shrink:0;margin-top:.1rem}
+.step-info .step-title{font-size:.78rem;font-weight:500;color:var(--text);margin-bottom:.1rem}
+.step-info .step-code{font-family:var(--mono);font-size:.65rem;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:3px;padding:.15rem .4rem;margin-top:.2rem;display:inline-block}
+.infra-card{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.85rem 1rem;margin-top:.5rem}
+.infra-title{font-family:var(--mono);font-size:.62rem;color:var(--muted);margin-bottom:.5rem;letter-spacing:.08em}
+.infra-body{font-size:.73rem;color:var(--muted);line-height:1.6}
+
+/* RESULT */
+#s9 .result-layout{display:grid;grid-template-columns:1fr 1fr;gap:1.5rem;width:100%;max-width:900px}
+.pr-mock{background:var(--surface);border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.pr-bar{background:var(--panel);border-bottom:1px solid var(--border);padding:.6rem 1rem;font-family:var(--mono);font-size:.65rem;color:var(--muted);display:flex;align-items:center;gap:.5rem}
+.pr-dot{width:8px;height:8px;border-radius:50%}
+.pr-content{padding:1rem}
+.pr-comment{background:var(--red-d);border:1px solid rgba(255,59,92,.3);border-radius:6px;padding:.75rem;margin-bottom:.5rem;font-size:.72rem}
+.pr-comment .pr-c-head{display:flex;align-items:center;gap:.5rem;margin-bottom:.3rem}
+.pr-c-badge{font-family:var(--mono);font-size:.58rem;background:var(--red);color:white;padding:.1rem .4rem;border-radius:3px}
+.pr-c-title{font-size:.72rem;font-weight:500;color:var(--text)}
+.pr-c-body{font-size:.68rem;color:var(--muted);line-height:1.5}
+.pr-c-code{background:#0D0D12;border-radius:3px;padding:.4rem .6rem;font-family:var(--mono);font-size:.62rem;color:var(--red);margin-top:.4rem}
+.pr-status{display:flex;align-items:center;gap:.5rem;background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.6rem .75rem;margin-top:.5rem;font-size:.72rem}
+.pr-status-dot{width:10px;height:10px;border-radius:50%;background:var(--red);box-shadow:0 0 6px var(--red);flex-shrink:0}
+.pr-status-text{color:var(--text)}
+.impact-list{display:flex;flex-direction:column;gap:.5rem}
+.impact-row{background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.85rem 1rem}
+.impact-title{font-size:.8rem;font-weight:500;color:var(--text);margin-bottom:.2rem}
+.impact-body{font-size:.72rem;color:var(--muted);line-height:1.5}
+
+/* SLIDE SPECIFIC LAYOUT */
+.slide-inner{width:100%;max-width:1000px}
+
+/* CHAIN FLOW */
+.chain-flow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  max-width: 900px;
+  margin: 1.5rem 0;
+  position: relative;
+}
+.chain-node {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1rem;
+  width: 180px;
+  text-align: center;
+  position: relative;
+  z-index: 2;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+}
+.chain-node:hover {
+  border-color: var(--red);
+  transform: translateY(-4px);
+  box-shadow: 0 8px 30px rgba(255, 59, 92, 0.2);
+}
+.chain-icon {
+  font-size: 1.8rem;
+  margin-bottom: 0.5rem;
+}
+.chain-label {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.chain-desc {
+  font-size: 0.65rem;
+  color: var(--muted);
+  margin-top: 0.25rem;
+  line-height: 1.4;
+}
+.chain-link-line {
+  flex: 1;
+  height: 2px;
+  background: linear-gradient(90deg, var(--border), var(--border-b));
+  position: relative;
+  z-index: 1;
+}
+.chain-link-line::after {
+  content: '▶';
+  position: absolute;
+  right: 50%;
+  top: 50%;
+  transform: translate(50%, -50%);
+  color: var(--dim);
+  font-size: 0.55rem;
+}
+
+/* SEQUENCE DIAGRAM */
+.seq-diag-container {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 860px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  margin-top: 1rem;
+  position: relative;
+}
+.seq-actors {
+  display: flex;
+  justify-content: space-between;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 0.75rem;
+  margin-bottom: 1rem;
+}
+.seq-actor {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  font-weight: 600;
+  background: var(--surface);
+  border: 1px solid var(--border-b);
+  padding: 0.35rem 0.8rem;
+  border-radius: 4px;
+  color: var(--text);
+  min-width: 130px;
+  text-align: center;
+}
+.seq-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 0.85rem;
+  position: relative;
+}
+.seq-step-row {
+  display: flex;
+  align-items: center;
+  font-size: 0.7rem;
+  position: relative;
+  height: 30px;
+}
+.seq-step-label {
+  font-family: var(--mono);
+  font-size: 0.62rem;
+  color: var(--muted);
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  white-space: nowrap;
+}
+.seq-step-arrow {
+  height: 2px;
+  background: var(--red);
+  position: relative;
+  flex: 1;
+}
+.seq-step-arrow::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: -3px;
+  width: 0;
+  height: 0;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  border-left: 6px solid var(--red);
+}
+.seq-step-arrow.reverse::after {
+  left: 0;
+  right: auto;
+  border-left: none;
+  border-right: 6px solid var(--red);
+}
+.seq-step-spacer {
+  flex: 1;
+}
+
+/* COMPARISON SLIDE */
+.comp-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  width: 100%;
+  max-width: 900px;
+  margin-top: 1rem;
+}
+.comp-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.5rem;
+  transition: all 0.3s ease;
+}
+.comp-card.gg {
+  border-top: 3px solid var(--muted);
+}
+.comp-card.psg {
+  border-top: 3px solid var(--green);
+  box-shadow: 0 4px 20px rgba(0, 229, 160, 0.05);
+}
+.comp-card-title {
+  font-family: var(--display);
+  font-size: 1.1rem;
+  font-weight: 700;
+  margin-bottom: 0.5rem;
+}
+.comp-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.72rem;
+  margin-top: 0.5rem;
+}
+.comp-table th, .comp-table td {
+  padding: 0.6rem 0.5rem;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.comp-table th {
+  font-family: var(--mono);
+  font-size: 0.6rem;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.comp-table td strong {
+  color: var(--text);
+}
+
+/* CIRCULAR FLOW SLIDE */
+.circle-flow-container {
+  position: relative;
+  width: 500px;
+  height: 500px;
+  margin: 1.5rem auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.circle-center {
+  width: 130px;
+  height: 130px;
+  background: var(--surface);
+  border: 2px dashed var(--red);
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+  box-shadow: 0 0 35px rgba(255, 59, 92, 0.25);
+}
+.circle-center-title {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text);
+  text-align: center;
+}
+.circle-center-port {
+  font-family: var(--mono);
+  font-size: 0.58rem;
+  color: var(--green);
+  margin-top: 0.2rem;
+  font-weight: 600;
+}
+.circle-node {
+  position: absolute;
+  width: 115px;
+  height: 115px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0.6rem;
+  text-align: center;
+  z-index: 4;
+  transition: all 0.3s ease;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.4);
+}
+.circle-node:hover {
+  border-color: var(--red);
+  box-shadow: 0 0 25px rgba(255,59,92,0.3);
+  transform: scale(1.08);
+}
+.circle-node-icon {
+  font-size: 1.3rem;
+  margin-bottom: 0.15rem;
+}
+.circle-node-title {
+  font-family: var(--mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  color: var(--text);
+  line-height: 1.2;
+}
+.circle-node-desc {
+  font-size: 0.52rem;
+  color: var(--muted);
+  line-height: 1.3;
+  margin-top: 0.1rem;
+}
+
+/* Positions on orbit (radius 180px) */
+.node-1 { top: 15px; left: 192px; } /* Webhook */
+.node-2 { top: 110px; right: 35px; } /* Static Scan */
+.node-3 { bottom: 65px; right: 70px; } /* LLM Analysis */
+.node-4 { bottom: 65px; left: 70px; } /* Critique */
+.node-5 { top: 110px; left: 35px; } /* Gate */
+
+/* SVG Orbit Track */
+.orbit-svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: 2;
+}
+.orbit-line {
+  fill: none;
+  stroke: var(--border-b);
+  stroke-width: 2;
+  stroke-dasharray: 6, 6;
+  animation: orbit-spin 60s linear infinite;
+  transform-origin: center;
+}
+.branch-line {
+  fill: none;
+  stroke: var(--green);
+  stroke-width: 1.5;
+  stroke-dasharray: 4, 4;
+}
+.branch-label {
+  position: absolute;
+  font-family: var(--mono);
+  font-size: 0.52rem;
+  color: var(--green);
+  background: var(--surface);
+  border: 1px solid var(--green-d);
+  padding: 0.1rem 0.3rem;
+  border-radius: 3px;
+  white-space: nowrap;
+  z-index: 6;
+}
+.branch-fp {
+  bottom: 230px;
+  left: 10px;
+}
+
+@keyframes orbit-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ANIMATED BG */
+.bg-grid{position:fixed;inset:0;background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:50px 50px;opacity:.15;pointer-events:none;z-index:0}
+.slide{z-index:1}
+</style>
+</head>
+<body>
+<div class="bg-grid"></div>
+
+<div class="deck">
+  <div class="slides">
+
+    <!-- SLIDE 0: HERO -->
+    <div class="slide active" id="s0">
+      <div class="hero-grid">
+        <div>
+          <div class="eyebrow">Enterprise AI Security · Fintech</div>
+          <div class="big-title">Automated PR<br><span>Security Guard</span></div>
+          <p class="subtitle">An AI agent that intercepts every Pull Request in a bank's codebase, scans it for security threats in seconds, and blocks the merge before a single mistake reaches production.</p>
+          <div class="hero-stats">
+            <div class="stat"><div class="stat-num">&lt;6s</div><div class="stat-lbl">Scan time per PR</div></div>
+            <div class="stat"><div class="stat-num">16+</div><div class="stat-lbl">Threat categories detected</div></div>
+            <div class="stat"><div class="stat-num">5</div><div class="stat-lbl">AI pipeline stages</div></div>
+            <div class="stat"><div class="stat-num">0.98</div><div class="stat-lbl">CVE detection confidence</div></div>
+          </div>
+        </div>
+        <div style="display:flex;justify-content:center">
+          <div class="scanner">
+            <div class="scanner-ring"></div>
+            <div class="scanner-ring"></div>
+            <div class="scanner-ring"></div>
+            <div class="scanner-ring"></div>
+            <div class="scanner-center"><div class="scanner-icon">🔐</div></div>
+            <div class="scanner-line"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 1: THE PROBLEM -->
+    <div class="slide" id="s1">
+      <div class="eyebrow">Why we built this</div>
+      <div class="section-title">The Problem</div>
+      <div class="section-sub">What goes wrong every single day in large engineering teams</div>
+      <div class="problem-grid">
+        <div class="problem-card crit">
+          <div class="problem-num">01</div>
+          <div class="problem-icon">🔑</div>
+          <div class="problem-title" style="color:var(--red)">Hardcoded Secrets</div>
+          <div class="problem-desc">Developers accidentally paste real API keys, passwords, and database credentials directly into source code during rapid development.</div>
+          <div class="code-snippet">
+            <span class="bad">String key = "sk-live-xK9mP2q...";</span><br>
+            <span class="bad">String pass = "Lloyds@Prod2024!";</span><br>
+            <span class="ok">// Should be: System.getenv("DB_PASS")</span>
+          </div>
+        </div>
+        <div class="problem-card high">
+          <div class="problem-num">02</div>
+          <div class="problem-icon">💉</div>
+          <div class="problem-title" style="color:var(--amber)">SQL Injection</div>
+          <div class="problem-desc">A developer takes a shortcut and builds a database query by pasting user input directly into it — letting attackers manipulate the query.</div>
+          <div class="code-snippet">
+            <span class="bad">"SELECT * FROM accounts WHERE id = " + userId;</span><br>
+            <span class="ok">// Should be: preparedStatement with ?</span>
+          </div>
+        </div>
+        <div class="problem-card med">
+          <div class="problem-num">03</div>
+          <div class="problem-icon">📦</div>
+          <div class="problem-title" style="color:var(--blue)">Vulnerable Libraries</div>
+          <div class="problem-desc">A team upgrades a library and accidentally downgrades another to a version with a critical known vulnerability — like Log4Shell (CVSS 10.0).</div>
+          <div class="code-snippet">
+            <span class="bad">&lt;version&gt;2.14.1&lt;/version&gt; ← CVE-2021-44228</span><br>
+            <span class="ok">&lt;version&gt;2.17.1&lt;/version&gt; ← Fixed</span>
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:1.25rem;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:1rem 1.5rem;display:flex;gap:3rem;width:100%;max-width:860px">
+        <div><div style="font-family:var(--display);font-size:1.8rem;font-weight:800;color:var(--red)">83%</div><div style="font-size:.72rem;color:var(--muted)">of data breaches involve stolen credentials</div></div>
+        <div><div style="font-family:var(--display);font-size:1.8rem;font-weight:800;color:var(--amber)">£4.2M</div><div style="font-size:.72rem;color:var(--muted)">average cost of a UK financial data breach (2024)</div></div>
+        <div><div style="font-family:var(--display);font-size:1.8rem;font-weight:800;color:var(--blue)">100s</div><div style="font-size:.72rem;color:var(--muted)">of PRs merged daily at banks like Lloyds</div></div>
+        <div><div style="font-family:var(--display);font-size:1.8rem;font-weight:800;color:var(--muted)">~5pm</div><div style="font-size:.72rem;color:var(--muted)">when most security mistakes reach production</div></div>
+      </div>
+    </div>
+
+    <!-- SLIDE 2: THE SOLUTION -->
+    <div class="slide" id="s2">
+      <div class="eyebrow">What we built</div>
+      <div class="section-title">The Solution</div>
+      <div class="section-sub">An invisible security engineer that reviews every single PR — automatically</div>
+      <div class="chain-flow">
+        <div class="chain-node">
+          <div class="chain-icon">👨‍💻</div>
+          <div class="chain-label">1. Developer</div>
+          <div class="chain-desc">Creates pull request with code updates</div>
+        </div>
+        <div class="chain-link-line"></div>
+        <div class="chain-node">
+          <div class="chain-icon">🐙</div>
+          <div class="chain-label">2. GitHub Webhook</div>
+          <div class="chain-desc">Instantly triggers on PR push events</div>
+        </div>
+        <div class="chain-link-line"></div>
+        <div class="chain-node">
+          <div class="chain-icon">🤖</div>
+          <div class="chain-label">3. FastAPI Agent</div>
+          <div class="chain-desc">LangGraph pipeline & OSV API scans the diff</div>
+        </div>
+        <div class="chain-link-line"></div>
+        <div class="chain-node">
+          <div class="chain-icon">✅</div>
+          <div class="chain-label">4. Gate Decision</div>
+          <div class="chain-desc">Blocks merge or posts warnings to PR</div>
+        </div>
+      </div>
+      <div class="outcome-row" style="max-width:860px">
+        <div class="outcome block">
+          <div class="outcome-label">🚫  BLOCK — Merge prevented</div>
+          <div class="outcome-desc">Critical threats (hardcoded secrets, SQL injection, CVE-10.0 libraries) — the merge button is physically disabled on GitHub. PR cannot proceed.</div>
+        </div>
+        <div class="outcome warn">
+          <div class="outcome-label">⚠️  WARN — Review required</div>
+          <div class="outcome-desc">Medium severity issues (disabled CORS, sensitive data in logs, hardcoded URLs) — PR is not blocked but a warning comment is posted for a human to review.</div>
+        </div>
+        <div class="outcome allow">
+          <div class="outcome-label">✅  ALLOW — Safe to merge</div>
+          <div class="outcome-desc">No security violations detected, or all findings were assessed as false positives by the self-reflection loop. Green tick posted on the PR.</div>
+        </div>
+      </div>
+    </div>
+
+
+    <!-- SLIDE 3: HLD -->
+    <div class="slide" id="s3">
+      <div class="eyebrow">System Design</div>
+      <div class="section-title">High Level Design (HLD)</div>
+      <div class="section-sub">The core components and how they connect to the outside world</div>
+      <div class="hld" style="max-width:900px">
+        <div class="hld-arch" style="grid-template-columns: 1fr auto 1fr;">
+          <div class="arch-service python">
+            <span class="arch-icon">🤖</span>
+            <div class="arch-name amber">FastAPI Agent</div>
+            <div class="arch-tech">Webhook Receiver & LangGraph logic</div>
+            <div class="arch-tech" style="margin-top:.2rem;font-size:.6rem">Python 3.11 · Port 8000</div>
+          </div>
+          <div class="arch-arrow">→</div>
+          <div class="arch-service db">
+            <span class="arch-icon">🗄️</span>
+            <div class="arch-name green">PostgreSQL</div>
+            <div class="arch-tech">Audit Log Database</div>
+            <div class="arch-tech" style="margin-top:.2rem;font-size:.6rem">Every finding stored · Port 5432</div>
+          </div>
+        </div>
+        <div style="text-align:center;font-family:var(--mono);font-size:.6rem;color:var(--dim);margin:.6rem 0">↑ receives webhooks & calls AI APIs &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp; ↑ logs results back to DB and GitHub</div>
+        <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.6rem 1rem;text-align:center;font-size:.72rem;color:var(--muted);margin-bottom:.75rem">All services run together with one command: <span style="font-family:var(--mono);color:var(--green)">docker-compose up</span></div>
+        <div style="font-family:var(--mono);font-size:.6rem;color:var(--dim);letter-spacing:.1em;margin-bottom:.5rem">EXTERNAL INTEGRATIONS</div>
+        <div class="hld-externals">
+          <div class="ext-chip">🐙 <span class="ext-name">GitHub API</span>Posts PR comments & blocks merges</div>
+          <div class="ext-chip">🌐 <span class="ext-name">Mistral Codestral</span>Code-specialist AI model</div>
+          <div class="ext-chip">🔍 <span class="ext-name">OSV Database</span>Free CVE vulnerability lookup</div>
+          <div class="ext-chip">📊 <span class="ext-name">LangSmith</span>AI tracing & audit trail</div>
+          <div class="ext-chip">🔒 <span class="ext-name">Webhook HMAC</span>Validates GitHub identity</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 4_SEQ: SEQUENCE DIAGRAM -->
+    <div class="slide" id="s3_seq">
+      <div class="eyebrow">Interaction Flow</div>
+      <div class="section-title">System Sequence Diagram</div>
+      <div class="section-sub">Step-by-step request lifetime across participants</div>
+      <div class="seq-diag-container">
+        <div class="seq-actors">
+          <div class="seq-actor">Dev / GitHub</div>
+          <div class="seq-actor">FastAPI Agent</div>
+          <div class="seq-actor">OSV API</div>
+          <div class="seq-actor">Mistral AI</div>
+          <div class="seq-actor">PostgreSQL</div>
+        </div>
+        <div class="seq-steps">
+          <div class="seq-step-row">
+            <span class="seq-step-label">1. Developer Pushes Code / Opens PR</span>
+            <div class="seq-step-arrow" style="flex: 1;"></div>
+            <div class="seq-step-spacer" style="flex: 3;"></div>
+          </div>
+          <div class="seq-step-row">
+            <span class="seq-step-label">2. Trigger Webhook HTTP POST</span>
+            <div class="seq-step-arrow" style="flex: 1;"></div>
+            <div class="seq-step-spacer" style="flex: 3;"></div>
+          </div>
+          <div class="seq-step-row">
+            <span class="seq-step-label">3. Batch Query Dependency CVEs</span>
+            <div class="seq-step-spacer" style="flex: 1;"></div>
+            <div class="seq-step-arrow" style="flex: 1;"></div>
+            <div class="seq-step-spacer" style="flex: 2;"></div>
+          </div>
+          <div class="seq-step-row">
+            <span class="seq-step-label">4. Return Confirmed OSV Data</span>
+            <div class="seq-step-spacer" style="flex: 1;"></div>
+            <div class="seq-step-arrow reverse" style="flex: 1;"></div>
+            <div class="seq-step-spacer" style="flex: 2;"></div>
+          </div>
+          <div class="seq-step-row">
+            <span class="seq-step-label">5. Request Semantic LLM Analysis</span>
+            <div class="seq-step-spacer" style="flex: 1;"></div>
+            <div class="seq-step-arrow" style="flex: 2;"></div>
+            <div class="seq-step-spacer" style="flex: 1;"></div>
+          </div>
+          <div class="seq-step-row">
+            <span class="seq-step-label">6. Return JSON Findings & Critique</span>
+            <div class="seq-step-spacer" style="flex: 1;"></div>
+            <div class="seq-step-arrow reverse" style="flex: 2;"></div>
+            <div class="seq-step-spacer" style="flex: 1;"></div>
+          </div>
+          <div class="seq-step-row">
+            <span class="seq-step-label">7. Write Audit Log Trail</span>
+            <div class="seq-step-spacer" style="flex: 1;"></div>
+            <div class="seq-step-arrow" style="flex: 3;"></div>
+          </div>
+          <div class="seq-step-row">
+            <span class="seq-step-label">8. Post Comments / Block Merge</span>
+            <div class="seq-step-arrow reverse" style="flex: 1;"></div>
+            <div class="seq-step-spacer" style="flex: 3;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 5: LLD / PIPELINE -->
+    <div class="slide" id="s4">
+      <div class="eyebrow">Low Level Design (LLD)</div>
+      <div class="section-title">The Agent Pipeline</div>
+      <div class="section-sub">Five sequential stages — each one feeds structured data into the next</div>
+      <div class="pipeline">
+        <div class="pipe-stage s1">
+          <div class="pipe-label">
+            <span class="pipe-num">Stage 01</span>
+            <span class="pipe-name">Webhook</span>
+          </div>
+          <div class="pipe-content">
+            <div class="pipe-chip"><strong style="color:var(--blue)">HMAC Validation</strong><span>Verify GitHub signature to prevent fake webhooks</span></div>
+            <div class="pipe-chip"><strong style="color:var(--blue)">Diff Extraction</strong><span>Fetch unified git diff from GitHub API</span></div>
+            <div class="pipe-chip"><strong style="color:var(--blue)">pom.xml Fetch</strong><span>Get full file for CVE scanning (not just diff)</span></div>
+          </div>
+        </div>
+        <div class="pipe-connector"><div class="pipe-connector-line"></div></div>
+        <div class="pipe-stage s2">
+          <div class="pipe-label">
+            <span class="pipe-num">Stage 02</span>
+            <span class="pipe-name">Prefilter</span>
+          </div>
+          <div class="pipe-content">
+            <div class="pipe-chip"><strong style="color:var(--amber)">Regex Scanner</strong><span>10 compiled patterns — AWS keys, JWTs, passwords</span></div>
+            <div class="pipe-chip"><strong style="color:var(--amber)">CVE Scanner</strong><span>OSV API lookup for every Maven dependency</span></div>
+          </div>
+        </div>
+        <div class="pipe-connector"><div class="pipe-connector-line"></div></div>
+        <div class="pipe-stage s3">
+          <div class="pipe-label">
+            <span class="pipe-num">Stage 03</span>
+            <span class="pipe-name">Analysis</span>
+          </div>
+          <div class="pipe-content">
+            <div class="pipe-chip"><strong style="color:var(--red)">Mistral Codestral</strong><span>Deep semantic analysis of the code diff</span></div>
+            <div class="pipe-chip"><strong style="color:var(--red)">Structured Output</strong><span>Returns strict JSON — finding_id, severity, confidence, remediation</span></div>
+          </div>
+        </div>
+        <div class="pipe-connector"><div class="pipe-connector-line"></div></div>
+        <div class="pipe-stage s4">
+          <div class="pipe-label">
+            <span class="pipe-num">Stage 04</span>
+            <span class="pipe-name">Reflection</span>
+          </div>
+          <div class="pipe-content">
+            <div class="pipe-chip"><strong style="color:var(--green)">Self-Critique Loop</strong><span>AI challenges its own findings — removes false positives</span></div>
+            <div class="pipe-chip"><strong style="color:var(--green)">Confidence Scoring</strong><span>Adjusts score +/- per finding. Threshold: 0.85 to block</span></div>
+          </div>
+        </div>
+        <div class="pipe-connector"><div class="pipe-connector-line"></div></div>
+        <div class="pipe-stage s5">
+          <div class="pipe-label">
+            <span class="pipe-num">Stage 05</span>
+            <span class="pipe-name">Gate</span>
+          </div>
+          <div class="pipe-content">
+            <div class="pipe-chip"><strong>Merge Decision</strong><span>BLOCK / WARN / ALLOW based on severity + confidence</span></div>
+            <div class="pipe-chip"><strong>GitHub Actions</strong><span>Post inline comments on exact lines + summary table</span></div>
+            <div class="pipe-chip"><strong>Audit Log</strong><span>Write all findings + LangSmith trace to PostgreSQL</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 6_CIRCULAR: DETAILED CIRCULAR FLOW -->
+    <div class="slide" id="s2_circular">
+      <div class="eyebrow">Pipeline Lifecycle</div>
+      <div class="section-title">Detailed Orbital Engine Flow</div>
+      <div class="section-sub">Data propagation cycle across the FastAPI Agent pipeline (running on Port 8000)</div>
+      <div class="circle-flow-container">
+        <!-- SVG Connections and Branches -->
+        <svg class="orbit-svg" viewBox="0 0 500 500">
+          <!-- Main Orbital Path -->
+          <circle cx="250" cy="250" r="180" class="orbit-line" />
+          <!-- False Positive Branch: Critique Node (4) to Gate (5) / Allowed State -->
+          <path d="M 115 390 Q 30 280 90 160" class="branch-line" />
+        </svg>
+        
+        <!-- False Positive Branch Label -->
+        <div class="branch-label branch-fp">❌ False Positive: Discard & Allow</div>
+
+        <!-- Center Node -->
+        <div class="circle-center">
+          <div class="circle-center-title">PR Security<br>Engine</div>
+          <div class="circle-center-port">Port 8000</div>
+        </div>
+
+        <!-- Node 1: Webhook (Top) -->
+        <div class="circle-node node-1">
+          <div class="circle-node-icon">🐙</div>
+          <div class="circle-node-title">1. Webhook</div>
+          <div class="circle-node-desc">Receives Git Diff & HMAC signature</div>
+        </div>
+
+        <!-- Node 2: Static Scanners (Right) -->
+        <div class="circle-node node-2">
+          <div class="circle-node-icon">🔍</div>
+          <div class="circle-node-title">2. Prefilter</div>
+          <div class="circle-node-desc">Regex secrets scan + OSV CVE lookup</div>
+        </div>
+
+        <!-- Node 3: LLM Analysis (Bottom Right) -->
+        <div class="circle-node node-3">
+          <div class="circle-node-icon">🤖</div>
+          <div class="circle-node-title">3. AI Analysis</div>
+          <div class="circle-node-desc">Mistral Codestral semantic verification</div>
+        </div>
+
+        <!-- Node 4: AI Critique (Bottom Left) -->
+        <div class="circle-node node-4">
+          <div class="circle-node-icon">🔄</div>
+          <div class="circle-node-title">4. AI Critique</div>
+          <div class="circle-node-desc">Self-reflection loop checks FPs</div>
+        </div>
+
+        <!-- Node 5: Gate Decision (Left) -->
+        <div class="circle-node node-5">
+          <div class="circle-node-icon">⚖️</div>
+          <div class="circle-node-title">5. Gate Action</div>
+          <div class="circle-node-desc">Applies Block, Warn, or Allow policy</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 7: TECH STACK -->
+    <div class="slide" id="s5">
+      <div class="eyebrow">Technology Choices</div>
+      <div class="section-title">Why These Tools?</div>
+      <div class="section-sub">Every technology was chosen for a specific reason — not default choices</div>
+      <div class="tech-grid">
+        <div class="tech-card python">
+          <div class="tech-name">Python FastAPI</div>
+          <div class="tech-role">AGENT SERVICE · ASYNC</div>
+          <div class="tech-why">Python is the native language of AI/ML frameworks. FastAPI gives us async request handling so the agent can call Mistral AI while staying responsive — no thread blocking.</div>
+          <div class="tech-badge">Native AI ecosystem</div>
+        </div>
+        <div class="tech-card mistral">
+          <div class="tech-name">Mistral Codestral</div>
+          <div class="tech-role">LLM · CODE SPECIALIST</div>
+          <div class="tech-why">Trained specifically on code — understands Java patterns, Spring Boot idioms, SQL injection vectors, and auth logic at a deeper level than general-purpose models. Runs at ~1s per scan.</div>
+          <div class="tech-badge">Code-first model</div>
+        </div>
+        <div class="tech-card langgraph">
+          <div class="tech-name">LangGraph</div>
+          <div class="tech-role">AGENT FRAMEWORK · PIPELINE</div>
+          <div class="tech-why">Defines the 5-stage security pipeline as a stateful graph. Each node receives the full state and passes structured updates forward. LangSmith tracing is attached automatically at compile time.</div>
+          <div class="tech-badge">Stateful agent pipelines</div>
+        </div>
+        <div class="tech-card osv">
+          <div class="tech-name">OSV API</div>
+          <div class="tech-role">CVE DATABASE · FREE</div>
+          <div class="tech-why">Google's Open Source Vulnerability database. Free, no API key, covers Maven/npm/PyPI. For every dependency version we query OSV and get back confirmed CVEs with real CVSS scores — no LLM guessing.</div>
+          <div class="tech-badge">Factual, not hallucinated</div>
+        </div>
+        <div class="tech-card docker">
+          <div class="tech-name">Docker Compose</div>
+          <div class="tech-role">INFRASTRUCTURE · 2 SERVICES</div>
+          <div class="tech-why">Packages both services (Python FastAPI agent + PostgreSQL) into containers that run identically on any machine. One command to start the entire system: <code style="font-size:.65rem">docker-compose up</code></div>
+          <div class="tech-badge">Reproducible everywhere</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 8: SELF REFLECTION -->
+    <div class="slide" id="s6">
+      <div class="eyebrow">The Clever Part</div>
+      <div class="section-title">Self-Reflection Loop</div>
+      <div class="section-sub">The AI second-guesses itself before blocking anyone's PR — the key to enterprise trust</div>
+      <div class="loop-wrap">
+        <div class="loop-steps">
+          <div class="loop-step">
+            <div class="loop-step-num">01</div>
+            <div class="loop-step-info">
+              <div class="ls-title">Initial Finding</div>
+              <div class="ls-body">Mistral Codestral reads the diff and produces raw findings: type, location, severity, initial confidence score.</div>
+            </div>
+          </div>
+          <div class="loop-step">
+            <div class="loop-step-num">02</div>
+            <div class="loop-step-info">
+              <div class="ls-title">Adversarial Critique</div>
+              <div class="ls-body">A second AI call asks: "Is this actually in a test file? Is this an env variable reference? Could this already be sanitized upstream?"</div>
+            </div>
+          </div>
+          <div class="loop-step">
+            <div class="loop-step-num">03</div>
+            <div class="loop-step-info">
+              <div class="ls-title">Confidence Adjustment</div>
+              <div class="ls-body">Each finding gets a confidence score adjustment (−0.40 to +0.15). False positives are identified and discarded.</div>
+            </div>
+          </div>
+          <div class="loop-step">
+            <div class="loop-step-num">04</div>
+            <div class="loop-step-info">
+              <div class="ls-title">Threshold Gate</div>
+              <div class="ls-body">Only findings with final confidence ≥ 0.85 block the merge. Between 0.60–0.85 → warning. Below 0.60 → discarded silently.</div>
+            </div>
+          </div>
+        </div>
+        <div class="confidence-demo">
+          <div class="conf-title">LIVE CONFIDENCE SCORES — BEFORE VS AFTER CRITIQUE</div>
+          <div class="conf-row">
+            <div class="conf-row-head"><span class="finding-name">Hardcoded API Key (line 14)</span><span class="verdict confirmed">✓ CONFIRMED</span></div>
+            <div class="conf-track"><div class="conf-fill red" style="width:100%"><div class="conf-after-bar" style="width:97%"></div></div></div>
+            <div class="conf-labels"><span>0%</span><span>Before: 95% → After: 97%</span><span>100%</span></div>
+          </div>
+          <div class="conf-row">
+            <div class="conf-row-head"><span class="finding-name">SQL injection (line 51)</span><span class="verdict confirmed">✓ CONFIRMED</span></div>
+            <div class="conf-track"><div class="conf-fill red" style="width:100%"><div class="conf-after-bar" style="width:89%"></div></div></div>
+            <div class="conf-labels"><span>0%</span><span>Before: 85% → After: 89%</span><span>100%</span></div>
+          </div>
+          <div class="conf-row">
+            <div class="conf-row-head"><span class="finding-name">Hardcoded URL (AppConfig)</span><span class="verdict fp">✗ FALSE POSITIVE</span></div>
+            <div class="conf-track"><div class="conf-fill green" style="width:100%"><div class="conf-after-bar" style="width:38%"></div></div></div>
+            <div class="conf-labels"><span>0%</span><span>Before: 70% → After: 38% → DISCARDED</span><span>100%</span></div>
+          </div>
+          <div class="conf-row">
+            <div class="conf-row-head"><span class="finding-name">Secret in test mock file</span><span class="verdict fp">✗ FALSE POSITIVE</span></div>
+            <div class="conf-track"><div class="conf-fill green" style="width:100%"><div class="conf-after-bar" style="width:30%"></div></div></div>
+            <div class="conf-labels"><span>0%</span><span>Before: 75% → After: 30% → DISCARDED</span><span>100%</span></div>
+          </div>
+          <div style="margin-top:.75rem;background:var(--surface);border-radius:5px;padding:.6rem .75rem;font-size:.7rem;color:var(--muted)">
+            <span style="color:var(--green);font-family:var(--mono);font-size:.65rem">WHY THIS MATTERS:</span> Without critique, 30-40% of findings are false positives — developers stop trusting the tool and disable it. With critique, false positive rate drops below 5%.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 9: CVE -->
+    <div class="slide" id="s7">
+      <div class="eyebrow">Dependency Security</div>
+      <div class="section-title">CVE Detection Engine</div>
+      <div class="section-sub">Real vulnerability database lookups — not AI guessing from memory</div>
+      <div class="cve-layout">
+        <div class="cve-flow">
+          <div class="cve-step s1">
+            <div class="cve-step-title">Step 1 — Fetch full pom.xml</div>
+            <div class="cve-step-body">When pom.xml appears in a PR, we fetch the COMPLETE file from GitHub (not just the diff). This catches pre-existing vulnerable dependencies, not just newly added ones.</div>
+          </div>
+          <div class="cve-step s2">
+            <div class="cve-step-title">Step 2 — Extract all dependencies</div>
+            <div class="cve-step-body">Parse every &lt;dependency&gt; block in the full pom.xml. Resolve property references like ${log4j2.version} back to real version numbers. Produces a list of groupId:artifactId:version tuples.</div>
+          </div>
+          <div class="cve-step s3">
+            <div class="cve-step-title">Step 3 — Query OSV database</div>
+            <div class="cve-step-body">Batch-query api.osv.dev for all dependencies at once. For each vulnerability ID found, fetch full details including CVSS score, CVE alias, and remediation link. Free, no API key, covers 50k+ packages.</div>
+          </div>
+          <div style="background:var(--panel);border:1px solid var(--border);border-radius:6px;padding:.85rem 1rem;margin-top:.25rem">
+            <div style="font-family:var(--mono);font-size:.62rem;color:var(--muted);margin-bottom:.4rem;letter-spacing:.06em">ACCURACY COMPARISON</div>
+            <div style="display:grid;grid-template-columns:1fr 1fr;gap:.75rem">
+              <div style="font-size:.72rem;color:var(--muted)"><span style="color:var(--red);font-family:var(--mono);font-size:.65rem">LLM ALONE</span><br>Only catches famous CVEs it saw in training. Log4Shell: yes. Newer 2024 CVEs: maybe. Confidence varies wildly.</div>
+              <div style="font-size:.72rem;color:var(--muted)"><span style="color:var(--green);font-family:var(--mono);font-size:.65rem">OSV API + LLM</span><br>Every CVE in the database, regardless of fame. 0.98 confidence. CVSS score, fix version, compliance link — all factual.</div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:var(--mono);font-size:.6rem;color:var(--dim);margin-bottom:.5rem;letter-spacing:.08em">SAMPLE FINDINGS FROM YOUR pom.xml</div>
+          <div class="cve-findings">
+            <div class="cve-finding">
+              <div><div class="cve-dep">log4j-core<span>:2.14.1</span></div><div style="font-size:.62rem;color:var(--dim);margin-top:.1rem">CVE-2021-44228 · Log4Shell</div></div>
+              <span class="cve-badge badge-crit">CRITICAL 10.0</span>
+            </div>
+            <div class="cve-finding">
+              <div><div class="cve-dep">log4j-core<span>:2.14.1</span></div><div style="font-size:.62rem;color:var(--dim);margin-top:.1rem">CVE-2021-45105 · DoS</div></div>
+              <span class="cve-badge badge-high">HIGH 7.5</span>
+            </div>
+            <div class="cve-finding">
+              <div><div class="cve-dep">log4j-core<span>:2.14.1</span></div><div style="font-size:.62rem;color:var(--dim);margin-top:.1rem">CVE-2026-34480 · Encoding</div></div>
+              <span class="cve-badge badge-med">MEDIUM 6.5</span>
+            </div>
+            <div class="cve-finding">
+              <div><div class="cve-dep">commons-codec<span>:1.16.0</span></div><div style="font-size:.62rem;color:var(--dim);margin-top:.1rem">No CVEs found</div></div>
+              <span class="cve-badge" style="background:var(--green-d);color:var(--green)">CLEAN ✓</span>
+            </div>
+          </div>
+          <div class="cve-osv" style="margin-top:.5rem">
+            <strong>OSV API is free and requires no API key.</strong> One HTTP call per batch. Returns JSON with vulnerability IDs, then we fetch full details per ID to get real CVSS scores. Both steps run in under 2 seconds.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 10_COMP: COMPARISON -->
+    <div class="slide" id="s7_comp">
+      <div class="eyebrow">Market Comparison</div>
+      <div class="section-title">GitGuardian vs PR-Security-Guard</div>
+      <div class="section-sub">Why general-purpose security tools fall short in custom developer workflows</div>
+      <div class="comp-grid">
+        <div class="comp-card gg">
+          <div class="comp-card-title" style="color:var(--muted)">GitGuardian</div>
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">Standard SaaS secrets scanner. Excellent for wide perimeter defense, but built with legacy constraints.</div>
+          <table class="comp-table">
+            <tr><th>Feature</th><th>Details</th></tr>
+            <tr><td><strong>Scan Vector</strong></td><td>Secrets only. No SQL Injection or custom logical validation.</td></tr>
+            <tr><td><strong>Accuracy</strong></td><td>Simple pattern/entropy search. High false-positive rates.</td></tr>
+            <tr><td><strong>Dependency Scanning</strong></td><td>Lacks version-BOM resolution. Skips parent BOM transitive files.</td></tr>
+            <tr><td><strong>Deployment</strong></td><td>SaaS-only. Requires code details to be mirrored outside organization.</td></tr>
+          </table>
+        </div>
+        <div class="comp-card psg">
+          <div class="comp-card-title" style="color:var(--green)">PR-Security-Guard</div>
+          <div style="font-size:0.75rem;color:var(--muted);margin-bottom:0.75rem">Custom AI-native guardrail. Scans code structure and dependency hierarchy contextually.</div>
+          <table class="comp-table">
+            <tr><th>Feature</th><th>Details</th></tr>
+            <tr><td><strong>Scan Vector</strong></td><td>Multi-vector (Secrets, SQL injection, logical flaws, CVE vulnerabilities).</td></tr>
+            <tr><td><strong>Accuracy</strong></td><td>AI Self-Reflection loop critiques own findings, reducing false positives to &lt;5%.</td></tr>
+            <tr><td><strong>Dependency Scanning</strong></td><td>Custom Maven BOM resolver dynamically fetches parent POM and maps transitive libraries.</td></tr>
+            <tr><td><strong>Deployment</strong></td><td>100% self-hosted Docker container. Complete privacy inside your VPC.</td></tr>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 11: MULTI REPO -->
+    <div class="slide" id="s8">
+      <div class="eyebrow">Enterprise Deployment</div>
+      <div class="section-title">Using It Across Multiple Repos</div>
+      <div class="section-sub">One running service — as many repositories as you want</div>
+      <div class="multi-layout">
+        <div>
+          <div style="font-family:var(--mono);font-size:.6rem;color:var(--dim);margin-bottom:.5rem;letter-spacing:.08em">REPOSITORIES CURRENTLY PROTECTED</div>
+          <div class="repo-list">
+            <div class="repo-row"><div class="repo-dot" style="background:var(--green)"></div><div class="repo-name">NiKlaus78/pr-security-guard-2</div><span class="repo-status status-active">ACTIVE</span></div>
+            <div class="repo-row" style="opacity:.6"><div class="repo-dot" style="background:var(--blue)"></div><div class="repo-name">lloyds/payment-service</div><span class="repo-status status-add">+ ADD WEBHOOK</span></div>
+            <div class="repo-row" style="opacity:.6"><div class="repo-dot" style="background:var(--blue)"></div><div class="repo-name">lloyds/account-service</div><span class="repo-status status-add">+ ADD WEBHOOK</span></div>
+            <div class="repo-row" style="opacity:.6"><div class="repo-dot" style="background:var(--blue)"></div><div class="repo-name">lloyds/fraud-detection</div><span class="repo-status status-add">+ ADD WEBHOOK</span></div>
+          </div>
+          <div class="infra-card">
+            <div class="infra-title">HOW IT SCALES (PRODUCTION)</div>
+            <div class="infra-body">Deploy the Docker stack to any Linux server (EC2, VPS, K8s). All repositories point to the same permanent URL. The async thread pool handles 10 concurrent PR scans. All findings land in the same PostgreSQL database — one compliance dashboard for all repos.</div>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:var(--mono);font-size:.6rem;color:var(--dim);margin-bottom:.5rem;letter-spacing:.08em">TO ADD A NEW REPO — 4 STEPS ONLY</div>
+          <div class="steps-list">
+            <div class="step-row">
+              <div class="step-bubble">1</div>
+              <div class="step-info">
+                <div class="step-title">Go to the new repo's settings</div>
+                <div style="font-size:.72rem;color:var(--muted)">GitHub → repo → Settings → Webhooks → Add webhook</div>
+              </div>
+            </div>
+            <div class="step-row">
+              <div class="step-bubble">2</div>
+              <div class="step-info">
+                <div class="step-title">Set the Payload URL</div>
+                <div class="step-code">https://your-server.com/webhook/github</div>
+              </div>
+            </div>
+            <div class="step-row">
+              <div class="step-bubble">3</div>
+              <div class="step-info">
+                <div class="step-title">Set the same secret</div>
+                <div style="font-size:.72rem;color:var(--muted)">Same GITHUB_WEBHOOK_SECRET from .env — works for all repos</div>
+              </div>
+            </div>
+            <div class="step-row">
+              <div class="step-bubble">4</div>
+              <div class="step-info">
+                <div class="step-title">Select "Pull requests" events only</div>
+                <div style="font-size:.72rem;color:var(--muted)">No code changes. No restarts. Immediately active for all future PRs.</div>
+              </div>
+            </div>
+          </div>
+          <div style="background:var(--panel);border:1px solid var(--green);border-radius:6px;padding:.85rem 1rem;margin-top:.75rem;font-size:.72rem;color:var(--muted)">
+            <span style="color:var(--green);font-family:var(--mono);font-size:.65rem;display:block;margin-bottom:.3rem">FOR ORGANISATION-WIDE COVERAGE</span>
+            GitHub supports one org-level webhook that covers all repos automatically. Combined with branch protection rules (require "pr-security-guard" check to pass), even repo admins cannot bypass the security scan.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- SLIDE 12: RESULTS -->
+    <div class="slide" id="s9">
+      <div class="eyebrow">What It Looks Like</div>
+      <div class="section-title">Real Output on GitHub</div>
+      <div class="section-sub">This is what a developer sees when their PR is blocked — specific, actionable, not generic</div>
+      <div class="result-layout">
+        <div>
+          <div style="font-family:var(--mono);font-size:.6rem;color:var(--dim);margin-bottom:.5rem;letter-spacing:.08em">PULL REQUEST #3 — feat/payment-gateway</div>
+          <div class="pr-mock">
+            <div class="pr-bar"><div class="pr-dot" style="background:#FF5F56"></div><div class="pr-dot" style="background:#FFBD2E"></div><div class="pr-dot" style="background:#27C93F"></div> PaymentService.java — inline comment</div>
+            <div class="pr-content">
+              <div class="pr-comment">
+                <div class="pr-c-head"><span class="pr-c-badge">🔴 CRITICAL</span><span class="pr-c-title">Secret exposure detected</span></div>
+                <div class="pr-c-body">A production API key was found hardcoded on this line. In a banking context, exposure of this key could grant an attacker direct access to payment processing APIs. This violates SEC-001 policy.</div>
+                <div class="pr-c-code">String API_KEY = "sk-live-xK9mP2qR4nL8vT7wY3uA";</div>
+                <div style="font-size:.65rem;color:var(--muted);margin-top:.4rem">Fix: Use System.getenv("PAYMENT_API_KEY") and store in AWS Secrets Manager.</div>
+              </div>
+              <div class="pr-comment" style="background:var(--amber-d);border-color:rgba(255,179,71,.3)">
+                <div class="pr-c-head"><span class="pr-c-badge" style="background:var(--amber)">🟠 HIGH</span><span class="pr-c-title">SQL injection risk</span></div>
+                <div class="pr-c-body">String concatenation in a SQL query allows attackers to manipulate the query with malicious input. Violates SEC-003 (PCI-DSS 6.2).</div>
+                <div class="pr-c-code" style="color:var(--amber)">"SELECT * FROM accounts WHERE id = " + accountId</div>
+              </div>
+              <div class="pr-status"><div class="pr-status-dot"></div><div class="pr-status-text"><strong>pr-security-guard</strong> · BLOCKED — 3 critical, 2 high violations found</div></div>
+            </div>
+          </div>
+        </div>
+        <div>
+          <div style="font-family:var(--mono);font-size:.6rem;color:var(--dim);margin-bottom:.5rem;letter-spacing:.08em">BUSINESS IMPACT</div>
+          <div class="impact-list">
+            <div class="impact-row">
+              <div class="impact-title">🏦 FCA Compliance Ready</div>
+              <div class="impact-body">Every scan creates an immutable audit entry in PostgreSQL with finding type, confidence, LangSmith trace ID, and developer identity. FCA/PCI-DSS audit teams can pull the full scan history at any time.</div>
+            </div>
+            <div class="impact-row">
+              <div class="impact-title">⚡ 6 Seconds, Not 6 Hours</div>
+              <div class="impact-body">A manual security review takes hours. This runs in under 6 seconds on every PR — including weekends, midnight deployments, and Friday evening releases when attention is lowest.</div>
+            </div>
+            <div class="impact-row">
+              <div class="impact-title">🎯 Specific, Not Generic</div>
+              <div class="impact-body">Every finding includes the exact file path, line number, the problematic code evidence, and a concrete fix suggestion — not "check your code for secrets." Developers know exactly what to fix.</div>
+            </div>
+            <div class="impact-row">
+              <div class="impact-title">📈 Portfolio Value</div>
+              <div class="impact-body">Built and debugged a real multi-service AI system: FastAPI + LangGraph + Mistral + OSV API + PostgreSQL + GitHub integration. Live demo-able in any interview — open a PR and show it get blocked.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- BOTTOM NAV -->
+  <div class="nav">
+    <button class="nav-btn" onclick="go(-1)">← Prev</button>
+    <div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+      <div class="nav-dots" id="dots"></div>
+      <div class="slide-counter" id="counter">1 / 13</div>
+    </div>
+    <button class="nav-btn" onclick="go(1)">Next →</button>
+  </div>
+</div>
+
+<script>
+const slides = document.querySelectorAll('.slide');
+const dotsEl = document.getElementById('dots');
+const counter = document.getElementById('counter');
+let cur = 0;
+
+// Build dots
+slides.forEach((_, i) => {
+  const d = document.createElement('div');
+  d.className = 'dot' + (i === 0 ? ' active' : '');
+  d.onclick = () => goTo(i);
+  dotsEl.appendChild(d);
+});
+
+function goTo(n) {
+  if (n < 0 || n >= slides.length) return;
+  slides[cur].classList.remove('active');
+  slides[cur].classList.add('out');
+  setTimeout(() => slides[cur].classList.remove('out'), 500);
+  cur = n;
+  slides[cur].classList.add('active');
+  document.querySelectorAll('.dot').forEach((d, i) => d.classList.toggle('active', i === cur));
+  counter.textContent = (cur + 1) + ' / ' + slides.length;
+}
+
+function go(dir) { goTo(cur + dir); }
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'ArrowRight' || e.key === 'ArrowDown') go(1);
+  if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') go(-1);
+});
+</script>
+</body>
+</html>

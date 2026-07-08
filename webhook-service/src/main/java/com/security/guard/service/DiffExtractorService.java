@@ -87,6 +87,36 @@ public class DiffExtractorService {
     }
 
     /**
+     * Fetches the full raw content of a file from GitHub at a specific commit.
+     * Used to get the complete pom.xml when it appears in a PR diff —
+     * so CVE scanning covers ALL dependencies, not just newly added lines.
+     */
+    public String fetchFileContent(String repoFullName, String filePath, String ref) {
+        String url = String.format("%s/repos/%s/contents/%s?ref=%s",
+                githubApiBase, repoFullName, filePath, ref);
+
+        try {
+            String response = webClient.get()
+                    .uri(url)
+                    .header(HttpHeaders.AUTHORIZATION, "Bearer " + githubToken)
+                    .header(HttpHeaders.ACCEPT, "application/vnd.github.raw+json")
+                    .retrieve()
+                    .bodyToMono(String.class)
+                    .timeout(Duration.ofSeconds(TIMEOUT_SECONDS))
+                    .block();
+
+            log.info("Fetched full file | repo={} file={} ref={}",
+                    repoFullName, filePath, ref);
+            return response != null ? response : "";
+
+        } catch (Exception e) {
+            log.warn("Could not fetch full file | repo={} file={} error={}",
+                    repoFullName, filePath, e.getMessage());
+            return "";
+        }
+    }
+
+    /**
      * Truncates diff to MAX_DIFF_CHARS at a clean file boundary where possible.
      */
     private String truncateDiff(String diff) {

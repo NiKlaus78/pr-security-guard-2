@@ -33,9 +33,20 @@ Schema:
 ### Mark FALSE_POSITIVE when:
 - The flagged code is in a test/mock/fixture/spec file (path contains: test, spec, mock, fixture, __tests__, example)
 - The "secret" is clearly a placeholder (e.g., "your-api-key-here", "changeme", "example", "placeholder")
-- The value is an environment variable reference: ${VAR_NAME}, process.env.X, @Value("${...}"), System.getenv()
+- The value is an environment variable reference or variable concatenation: ${VAR_NAME}, process.env.X, @Value("${...}"), System.getenv(), "Bearer " + token, "token " + githubToken
 - The "secret" is obviously fake (e.g., all zeros, "password123" in a README example)
 - The flagged pattern is in a comment or documentation string
+- The flagged code is ITSELF a regex/pattern definition used by a security scanner
+  (e.g. `re.compile(r'...eval...')`, `Pattern.compile("...")`, a tuple/list entry
+  pairing a regex string with a finding type like "EVAL_INJECTION" or "SQL_INJECTION"),
+  OR the flagged file is the security scanner's own source/prompt code
+  (paths like agent/nodes.py, agent/graph.py, agent/main.py,
+  agent/prompts/analyzer.py, agent/prompts/critique.py, agent/tools/cve_checker.py)
+  where dangerous-sounding keywords (eval, exec, os.system, pickle.loads,
+  jwt.decode, yaml.load) appear as documentation prose describing what the
+  scanner looks for (e.g. "eval()/exec() with user input", "pickle.loads() on
+  untrusted data") — NOT as actual executable calls. This is a security tool
+  discussing vulnerability patterns as its literal purpose, not a violation.
 
 ### Reduce confidence by 0.20-0.35 when:
 - The file path suggests it's a configuration template or example
