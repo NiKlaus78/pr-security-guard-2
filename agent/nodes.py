@@ -490,12 +490,20 @@ def llm_analyzer_node(state: dict) -> dict:
 
     except json.JSONDecodeError as e:
         log.error(f"[{state['scan_id']}] JSON parse failed: {e}\nRaw: {raw_text[:500]}")
-        # Full fallback — convert all regex hits to findings
-        return {"raw_findings": _prefilter_to_findings(state["prefilter_hits"])}
+        # Full fallback — convert all regex hits to findings and merge CVE findings
+        findings = _prefilter_to_findings(state["prefilter_hits"])
+        cve_findings = state.get("cve_findings", [])
+        if cve_findings:
+            findings = _merge_cve_into_findings(findings, cve_findings)
+        return {"raw_findings": findings}
 
     except Exception as e:
         log.error(f"[{state['scan_id']}] LLM analyzer failed: {e}")
-        return {"raw_findings": _prefilter_to_findings(state.get("prefilter_hits", [])),
+        findings = _prefilter_to_findings(state.get("prefilter_hits", []))
+        cve_findings = state.get("cve_findings", [])
+        if cve_findings:
+            findings = _merge_cve_into_findings(findings, cve_findings)
+        return {"raw_findings": findings,
                 "errors": state.get("errors", []) + [str(e)]}
 
 
