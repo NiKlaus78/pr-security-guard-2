@@ -681,10 +681,52 @@ def gate_decision_node(state: dict) -> dict:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+# Mapping of specific detector types to general vulnerability families.
+# Used to deduplicate generic LLM findings (e.g. SECRET_EXPOSURE) against
+# specific regex hits (e.g. HARDCODED_API_KEY).
+TYPE_FAMILY = {
+    # Mistral generic types
+    "SECRET_EXPOSURE": "SECRET",
+    "PRIVATE_KEY": "PRIVATE_KEY",
+    "DB_CREDENTIALS": "DB_CREDENTIALS",
+    "SQL_INJECTION": "SQL_INJECTION",
+    "VULN_DEPENDENCY": "VULN_DEPENDENCY",
+    "PCI_VIOLATION": "PCI_VIOLATION",
+    "BROKEN_AUTH": "BROKEN_AUTH",
+    "INSECURE_DESERIALIZE": "INSECURE_DESERIALIZE",
+    "CSRF_DISABLED": "CSRF_DISABLED",
+    "CORS_WILDCARD": "CORS_WILDCARD",
+    "SENSITIVE_IN_LOGS": "SENSITIVE_IN_LOGS",
+    "HARDCODED_URL": "HARDCODED_URL",
+
+    # Specific regex types mapped to families
+    "HARDCODED_PASSWORD": "SECRET",
+    "HARDCODED_API_KEY": "SECRET",
+    "AWS_ACCESS_KEY": "SECRET",
+    "AWS_SECRET_KEY": "SECRET",
+    "OPENAI_API_KEY": "SECRET",
+    "HARDCODED_SECRET": "SECRET",
+    "GITHUB_TOKEN": "SECRET",
+    "HARDCODED_JWT": "SECRET",
+    
+    "DB_CREDENTIALS_IN_URL": "DB_CREDENTIALS",
+    
+    "PCI_DATA_IN_LOGS": "PCI_VIOLATION",
+    
+    "EVAL_INJECTION": "INSECURE_DESERIALIZE",
+    "COMMAND_INJECTION": "INSECURE_DESERIALIZE",
+    
+    "XSS_RISK": "XSS_RISK"
+}
+
+def _get_type_family(t: str) -> str:
+    return TYPE_FAMILY.get(t, t)
+
+
 def _deduplicate_by_proximity(findings: list, line_window: int = 15) -> list:
     """
     Collapses findings that are almost certainly duplicates of the same real
-    issue: same type, same file, and within `line_window` lines of each other.
+    issue: same type family, same file, and within `line_window` lines of each other.
 
     This is a safety-net pass for cases the evidence-overlap merge can't catch
     — specifically when Mistral paraphrases a finding so differently from the
@@ -707,18 +749,30 @@ def _deduplicate_by_proximity(findings: list, line_window: int = 15) -> list:
         group = [f]
         used[i] = True
         f_type = f.get("type", "")
+        f_family = _get_type_family(f_type)
         f_file = f.get("file", "unknown")
         f_line = f.get("line", -1)
+
+        # Secrets/Credentials require an exact line match to prevent collapsing
+        # separate secrets on adjacent lines. Other vulnerabilities use the wider window.
+        current_window = 0 if f_family in ("SECRET", "DB_CREDENTIALS") else line_window
 
         for j in range(i + 1, len(findings)):
             if used[j]:
                 continue
             g = findings[j]
+            g_type = g.get("type", "")
+            g_family = _get_type_family(g_type)
+            g_line = g.get("line", -1)
+
+            same_family = f_family == g_family
+            same_file = g.get("file", "unknown") == f_file
+
             if (
-                g.get("type", "") == f_type
-                and g.get("file", "unknown") == f_file
-                and f_line >= 0 and g.get("line", -1) >= 0
-                and abs(g.get("line", -1) - f_line) <= line_window
+                same_family
+                and same_file
+                and f_line >= 0 and g_line >= 0
+                and abs(g_line - f_line) <= current_window
             ):
                 group.append(g)
                 used[j] = True
@@ -818,7 +872,7 @@ def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list
 
         # Look for an existing LLM finding that overlaps this same hit.
         #
-        # Two ways to detect overlap, BOTH gated on matching "type" and "file"
+        # Two ways to detect overlap, BOTH gated on matching "type family" and "file"
         # first (to avoid false collisions between unrelated findings):
         #   1. Full-line substring overlap (works when Mistral quotes the
         #      line close to verbatim)
@@ -826,11 +880,10 @@ def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list
         #      cases where Mistral PARAPHRASES the evidence in its own words
         #      (e.g. "Using eval() on user input allows RCE" instead of
         #      quoting "risk_score = eval(formula)" directly). Gating on
-        #      type+file keeps this safe from unrelated false matches, since
-        #      matched_text alone (e.g. "eval(") is too generic on its own.
+        #      type family + file keeps this safe from unrelated false matches.
         overlap_index = None
         for idx, f in enumerate(merged):
-            same_type = f.get("type", "") == hit["type"]
+            same_type = _get_type_family(f.get("type", "")) == _get_type_family(hit["type"])
             same_file = f.get("file", "unknown") in (hit_file, "unknown") or hit_file == "unknown"
             if not (same_type and same_file):
                 continue

@@ -66,9 +66,12 @@ public class PrScanOrchestrator {
                     "PR Security Guard is scanning...");
 
             // ── Step 2: Fetch unified diff ─────────────────────────────────
-            String diffContent = diffExtractorService.fetchDiff(repoFullName, prNumber);
+            // Fetch the FULL raw diff first — we need the complete content to
+            // detect manifest files (pom.xml, package.json, requirements.txt)
+            // even if they appear late in the diff and would be truncated.
+            String rawDiff = diffExtractorService.fetchRawDiff(repoFullName, prNumber);
 
-            if (diffContent.isBlank()) {
+            if (rawDiff.isBlank()) {
                 log.warn("No diff content found | repo={} PR=#{}", repoFullName, prNumber);
                 commentService.setSuccessStatus(repoFullName, headSha, "No diff to scan.");
                 return;
@@ -76,14 +79,21 @@ public class PrScanOrchestrator {
 
             // ── Step 3: Build agent scan request ──────────────────────────
             // Fetch full manifest content for each dependency file type that
-            // appears in the diff. Extract the ACTUAL path from the diff header —
-            // don't assume root-level files. e.g. diff could show
-            // "webhook-service/pom.xml" not just "pom.xml", or a monorepo could
-            // have "backend/package.json" and "ml-service/requirements.txt"
-            // alongside a Java service in the same PR.
-            String pomXmlContent = fetchManifestIfPresent(diffContent, repoFullName, headSha, "pom.xml");
-            String packageJsonContent = fetchManifestIfPresent(diffContent, repoFullName, headSha, "package.json");
-            String requirementsTxtContent = fetchManifestIfPresent(diffContent, repoFullName, headSha, "requirements.txt");
+            // appears in the FULL raw diff (before truncation). Extract the
+            // ACTUAL path from the diff header — don't assume root-level files.
+            // e.g. diff could show "webhook-service/pom.xml" not just "pom.xml",
+            // or a monorepo could have "backend/package.json" and
+            // "ml-service/requirements.txt" alongside a Java service in the same PR.
+            String pomXmlContent = fetchManifestIfPresent(rawDiff, repoFullName, headSha, "pom.xml");
+            String packageJsonContent = fetchManifestIfPresent(rawDiff, repoFullName, headSha, "package.json");
+            String requirementsTxtContent = fetchManifestIfPresent(rawDiff, repoFullName, headSha, "requirements.txt");
+
+            // Now apply smart truncation for the diff sent to the agent
+            String diffContent = rawDiff;
+            if (rawDiff.length() > 50_000) {
+                log.info("Applying smart truncation to diff | raw={}chars", rawDiff.length());
+                diffContent = diffExtractorService.smartTruncateDiff(rawDiff);
+            }
 
             AgentScanRequest request = AgentScanRequest.builder()
                     .prNumber(prNumber)
