@@ -306,8 +306,11 @@ def cve_scanner_node(state: dict) -> dict:
 
     # ── Maven: pom.xml (BOM resolution + transitive expansion happens inside) ──
     pom_xml_content = state.get("pom_xml_content", "")
-    if _manifest_actually_in_diff(diff, "pom.xml"):
-        pom_path = _extract_manifest_path(diff, "pom.xml")
+    pom_in_diff = _manifest_actually_in_diff(diff, "pom.xml")
+    # If the webhook fetched full pom.xml content, use it even if pom.xml
+    # was truncated out of the diff sent to the agent.
+    if pom_in_diff or pom_xml_content:
+        pom_path = _extract_manifest_path(diff, "pom.xml") if pom_in_diff else "pom.xml"
         log.info(f"[{state['scan_id']}] pom.xml path in repo: {pom_path}")
 
         if pom_xml_content:
@@ -329,8 +332,9 @@ def cve_scanner_node(state: dict) -> dict:
 
     # ── npm: package.json ───────────────────────────────────────────────────
     package_json_content = state.get("package_json_content", "")
-    if _manifest_actually_in_diff(diff, "package.json"):
-        pkg_path = _extract_manifest_path(diff, "package.json")
+    pkg_in_diff = _manifest_actually_in_diff(diff, "package.json")
+    if pkg_in_diff or package_json_content:
+        pkg_path = _extract_manifest_path(diff, "package.json") if pkg_in_diff else "package.json"
         log.info(f"[{state['scan_id']}] package.json detected at '{pkg_path}'")
         if package_json_content:
             deps = extract_dependencies_from_package_json(package_json_content)
@@ -344,8 +348,9 @@ def cve_scanner_node(state: dict) -> dict:
 
     # ── PyPI: requirements.txt ──────────────────────────────────────────────
     requirements_content = state.get("requirements_txt_content", "")
-    if _manifest_actually_in_diff(diff, "requirements.txt"):
-        req_path = _extract_manifest_path(diff, "requirements.txt")
+    req_in_diff = _manifest_actually_in_diff(diff, "requirements.txt")
+    if req_in_diff or requirements_content:
+        req_path = _extract_manifest_path(diff, "requirements.txt") if req_in_diff else "requirements.txt"
         log.info(f"[{state['scan_id']}] requirements.txt detected at '{req_path}'")
         if requirements_content:
             deps = extract_dependencies_from_requirements_txt(requirements_content)
