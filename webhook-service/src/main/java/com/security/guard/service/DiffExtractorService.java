@@ -98,7 +98,7 @@ public class DiffExtractorService {
      * Useful for future chunked scanning of very large PRs.
      */
     public List<String> splitDiffByFile(String diff) {
-        return List.of(diff.split("(?=diff --git )"))
+        return List.of(diff.split("(?m)^(?=diff --git )"))
                 .stream()
                 .filter(chunk -> !chunk.isBlank())
                 .toList();
@@ -210,6 +210,18 @@ public class DiffExtractorService {
         // Extract file path from first line: "diff --git a/path/file b/path/file"
         String firstLine = chunk.split("\n", 2)[0];
         String filePath = firstLine.toLowerCase();
+
+        // Deprioritize the security guard tool's own source code to avoid budget starvation
+        if (filePath.contains("agent/") || 
+            filePath.contains("webhook-service/src/main/java/com/security/guard/service/") ||
+            filePath.contains("webhook-service/src/main/java/com/security/guard/controller/") ||
+            filePath.contains("webhook-service/src/main/java/com/security/guard/config/") ||
+            filePath.contains("webhook-service/src/main/java/com/security/guard/model/") ||
+            filePath.contains(".gitignore") ||
+            filePath.contains("docker-compose") ||
+            filePath.contains("pr-security-guard-presentation")) {
+            return true;
+        }
 
         // Check against low-priority extensions
         for (String ext : LOW_PRIORITY_EXTENSIONS) {

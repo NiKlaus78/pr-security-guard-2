@@ -50,7 +50,7 @@ llm = ChatMistralAI(
 
 # Compiled patterns for speed — only match added lines (starting with +)
 SECRET_PATTERNS = [
-    (re.compile(r'(?i)\w*(password|passwd|pwd)\w*\s*[=:]\s*["\']?[^\s"\']{6,}'), "HARDCODED_PASSWORD", "CRITICAL"),
+    (re.compile(r'(?i)\w*(password|passwd|pwd|pass)\w*\s*[=:]\s*["\']?[^\s"\']{6,}'), "HARDCODED_PASSWORD", "CRITICAL"),
     (re.compile(r'(?i)\w*(api[_-]?key|apikey)\w*\s*[=:]\s*["\']?[^\s"\']{16,}'), "HARDCODED_API_KEY", "CRITICAL"),
     (re.compile(r'AKIA[0-9A-Z]{16}'), "AWS_ACCESS_KEY", "CRITICAL"),
     (re.compile(r'(?i)aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*["\']?[A-Za-z0-9/+=]{40}'), "AWS_SECRET_KEY", "CRITICAL"),
