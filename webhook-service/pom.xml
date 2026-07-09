@@ -88,11 +88,6 @@
 
     <build>
         <plugins>
-            <!-- Explicit Lombok annotation processor registration.
-                 Without this, some Docker/CI Maven builds silently skip
-                 Lombok code generation (no getters/setters/log fields),
-                 causing "cannot find symbol" errors that don't reproduce
-                 in local IDE builds. -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
