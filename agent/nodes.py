@@ -179,14 +179,26 @@ def regex_prefilter_node(state: dict) -> dict:
                 "source": "regex_prefilter"
             })
 
-    # ── Fix #5: XSS lookback — detect two-step patterns ─────────────────────
-    # Catches: const name = req.query.name; ... res.send(...+name+...)
+    # ── Fix #5 (generalized): Taint-tracking lookback for assign-then-use ───
+    # Many dangerous patterns use a two-step idiom:
+    #   const x = req.query.x;   // taint source
+    #   res.send(... + x + ...)  // dangerous sink
+    # Single-line regex misses these. This lookback checks each dangerous sink
+    # for a tainted variable assigned from req.query/body/params within 5 lines.
     _REQ_ASSIGN_RE = re.compile(r'(?:const|let|var)\s+(\w+)\s*=\s*req\.(query|body|params)[\.\[]')
-    _RES_SEND_RE = re.compile(r'res\.(send|write)\s*\(')
+
+    # (sink_regex, finding_type, severity, source_label)
+    _TAINT_SINKS = [
+        (re.compile(r'res\.(send|write)\s*\('),                          "XSS_RISK",       "MEDIUM", "regex_xss_lookback"),
+        (re.compile(r'res\.redirect\s*\('),                              "OPEN_REDIRECT",   "MEDIUM", "regex_redirect_lookback"),
+        (re.compile(r'(?:fs\.readFile(?:Sync)?|fs\.createReadStream)\s*\('), "PATH_TRAVERSAL",  "HIGH",   "regex_path_lookback"),
+    ]
 
     for idx, (line_num, line_content, file_path) in enumerate(added_lines):
-        if _RES_SEND_RE.search(line_content):
-            # Look back up to 5 lines in the same file
+        for sink_re, finding_type, severity, source_label in _TAINT_SINKS:
+            if not sink_re.search(line_content):
+                continue
+            # Look back up to 5 lines in the same file for a tainted variable
             for lookback in range(1, 6):
                 prev_idx = idx - lookback
                 if prev_idx < 0:
@@ -199,17 +211,17 @@ def regex_prefilter_node(state: dict) -> dict:
                     var_name = m.group(1)
                     if var_name in line_content:
                         already = any(
-                            h["file"] == file_path and h["diff_line"] == line_num and h["type"] == "XSS_RISK"
+                            h["file"] == file_path and h["diff_line"] == line_num and h["type"] == finding_type
                             for h in hits
                         )
                         if not already:
                             hits.append({
-                                "type": "XSS_RISK",
-                                "severity": "MEDIUM",
+                                "type": finding_type,
+                                "severity": severity,
                                 "line_content": line_content.strip(),
                                 "diff_line": line_num,
                                 "file": file_path,
-                                "source": "regex_xss_lookback"
+                                "source": source_label
                             })
                         break
 
@@ -580,7 +592,16 @@ def gate_decision_node(state: dict) -> dict:
 SECRET_TYPES = {"SECRET_EXPOSURE", "HARDCODED_API_KEY", "HARDCODED_PASSWORD",
                 "HARDCODED_SECRET", "AWS_ACCESS_KEY", "AWS_SECRET_KEY",
                 "API_KEY_PATTERN", "PRIVATE_KEY", "DB_CREDENTIALS",
-                "DB_CREDENTIALS_IN_URL", "GITHUB_TOKEN", "HARDCODED_JWT"}
+                "DB_CREDENTIALS_IN_URL", "GITHUB_TOKEN", "HARDCODED_JWT",
+                "HARDCODED_ENCRYPTION_KEY"}
+
+
+def _type_category(finding_type: str) -> str:
+    """Groups finding types into broad categories for coverage deduplication.
+    All secret types share one category; everything else is its own."""
+    if finding_type in SECRET_TYPES:
+        return "_SECRET_"
+    return finding_type
 
 
 def _build_regex_backing(prefilter_hits: list) -> list:
@@ -629,15 +650,17 @@ def _inject_missing_prefilter_hits(
         "LOW": 0.55,
     }
 
-    # Build set of (file, line) already represented in final output
-    # (excluding DISCARDs since those won't appear in the report)
+    # Build set of (file, type_category, line) already represented in output.
+    # TYPE-AWARE: a SECRET at line 14 does NOT suppress SQL_INJECTION at line 15.
+    # EXACT MATCH: Fix #1 (_correct_llm_lines) already aligns LLM findings to
+    # precise regex hit lines, so fuzzy proximity isn't needed here.
     covered = set()
     for f in final_findings:
         if f.get("gate_action") != "DISCARD":
-            covered.add((f.get("file", ""), f.get("line", 0)))
-            # Also mark nearby lines as covered to avoid near-duplicates
-            for offset in range(-3, 4):
-                covered.add((f.get("file", ""), f.get("line", 0) + offset))
+            f_file = f.get("file", "")
+            f_line = f.get("line", 0)
+            f_cat = _type_category(f.get("type", ""))
+            covered.add((f_file, f_cat, f_line))
 
     injected = []
     for i, hit in enumerate(prefilter_hits):
@@ -646,7 +669,7 @@ def _inject_missing_prefilter_hits(
         hit_type = hit["type"]
         hit_severity = hit["severity"]
 
-        if (hit_file, hit_line) in covered:
+        if (hit_file, _type_category(hit_type), hit_line) in covered:
             continue
 
         # This regex hit has NO corresponding finding in the output — inject it
@@ -836,8 +859,10 @@ def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list
             if f_file != hit_file or not types_related(hit_type, f_type):
                 continue
 
-            # Line proximity: within 3 lines accounts for LLM line number imprecision
-            if abs(diff_line - f_line) <= 3:
+            # Line proximity: exact match for secrets (they cluster on adjacent
+            # lines and ±3 swallows genuinely different findings), ±3 for others.
+            max_dist = 0 if (hit_type in SECRET_TYPES and f_type in SECRET_TYPES) else 3
+            if abs(diff_line - f_line) <= max_dist:
                 already_covered = True
                 break
 
