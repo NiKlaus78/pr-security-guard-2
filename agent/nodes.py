@@ -59,6 +59,8 @@ SECRET_PATTERNS = [
     (re.compile(r'(?i)(jdbc|mongodb|postgres|mysql)://[^:]+:[^@]+@'), "DB_CREDENTIALS_IN_URL", "CRITICAL"),
     (re.compile(r'(?i)ghp_[A-Za-z0-9]{36}'), "GITHUB_TOKEN", "CRITICAL"),
     (re.compile(r'eyJ[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_.+/=]*'), "HARDCODED_JWT", "HIGH"),
+    # Fix #4: ENCRYPTION_KEY variable naming
+    (re.compile(r"""(?i)(encryption[_-]?key|encrypt[_-]?key)\s*[=:]\s*["']?[A-Za-z0-9_\-!@#$%^&*+=.]{8,}"""), "HARDCODED_ENCRYPTION_KEY", "CRITICAL"),
 ]
 
 # ── Dangerous function call patterns ────────────────────────────────────────
@@ -92,6 +94,12 @@ DANGEROUS_CALL_PATTERNS = [
     # ── CORS / randomness ────────────────────────────────────────────────────
     (re.compile(r'''(?i)['"]Access-Control-Allow-Origin['"]\s*,\s*['"]\*['"]'''), "CORS_WILDCARD", "MEDIUM"),
     (re.compile(r'(?i)\bMath\.random\s*\('), "INSECURE_RANDOM", "MEDIUM"),
+    # ── Fix #4: Weak hashing ─────────────────────────────────────────────────
+    (re.compile(r"""(?i)(?:crypto\.createHash|MessageDigest\.getInstance|hashlib\.(?:md5|sha1))\s*\(\s*['"]?(md5|sha1)['"]?\s*\)"""), "WEAK_HASHING", "MEDIUM"),
+    # ── Fix #4: Path traversal via user-controlled file access ───────────────
+    (re.compile(r"""(?i)(?:fs\.readFile(?:Sync)?|fs\.createReadStream|open)\s*\([^)]*(?:req\.(query|body|params|url)|__dirname\s*\+\s*(?:req|user|file|path|input))"""), "PATH_TRAVERSAL", "HIGH"),
+    # ── Fix #4: Open redirect ────────────────────────────────────────────────
+    (re.compile(r'(?i)res\.redirect\s*\([^)]*req\.(query|body|params)'), "OPEN_REDIRECT", "MEDIUM"),
 ]
 
 CVV_LOG_PATTERN = re.compile(r'(?i)(log|print|console)\s*[\.\(].*?(cvv|card.?number|pan|ssn)', re.DOTALL)
@@ -170,6 +178,40 @@ def regex_prefilter_node(state: dict) -> dict:
                 "file": file_path,
                 "source": "regex_prefilter"
             })
+
+    # ── Fix #5: XSS lookback — detect two-step patterns ─────────────────────
+    # Catches: const name = req.query.name; ... res.send(...+name+...)
+    _REQ_ASSIGN_RE = re.compile(r'(?:const|let|var)\s+(\w+)\s*=\s*req\.(query|body|params)[\.\[]')
+    _RES_SEND_RE = re.compile(r'res\.(send|write)\s*\(')
+
+    for idx, (line_num, line_content, file_path) in enumerate(added_lines):
+        if _RES_SEND_RE.search(line_content):
+            # Look back up to 5 lines in the same file
+            for lookback in range(1, 6):
+                prev_idx = idx - lookback
+                if prev_idx < 0:
+                    break
+                prev_line_num, prev_content, prev_file = added_lines[prev_idx]
+                if prev_file != file_path:
+                    break
+                m = _REQ_ASSIGN_RE.search(prev_content)
+                if m:
+                    var_name = m.group(1)
+                    if var_name in line_content:
+                        already = any(
+                            h["file"] == file_path and h["diff_line"] == line_num and h["type"] == "XSS_RISK"
+                            for h in hits
+                        )
+                        if not already:
+                            hits.append({
+                                "type": "XSS_RISK",
+                                "severity": "MEDIUM",
+                                "line_content": line_content.strip(),
+                                "diff_line": line_num,
+                                "file": file_path,
+                                "source": "regex_xss_lookback"
+                            })
+                        break
 
     log.info(f"[{state['scan_id']}] Regex hits: {len(hits)}")
     return {"prefilter_hits": hits}
@@ -457,6 +499,18 @@ def gate_decision_node(state: dict) -> dict:
             elif is_regex_backed and severity == "MEDIUM":
                 gate_action = "WARN"
                 has_warn = True
+            # ── Fix #3: Confidence floor — rescue high-confidence LLM findings ──
+            # Many vulnerability classes (missing auth, weak hashing, path traversal,
+            # open redirect, rate limiting, enumeration) have no regex pattern.
+            # Without this, they vanish whenever critique second-guesses itself.
+            elif finding.get("initial_confidence", 0) >= 0.90 and severity in ("CRITICAL", "HIGH"):
+                gate_action = "WARN"   # downgrade from BLOCK, but don't DISCARD
+                has_warn = True
+                log.info(
+                    f"[{state['scan_id']}] Confidence floor rescued FALSE_POSITIVE: "
+                    f"{finding.get('type')} at line {finding.get('line')} "
+                    f"(initial_confidence={finding.get('initial_confidence', 0):.2f}, severity={severity})"
+                )
             else:
                 gate_action = "DISCARD"
         elif confidence >= BLOCK_THRESHOLD and severity in ("CRITICAL", "HIGH"):
@@ -651,6 +705,11 @@ def _remediation_for_type(finding_type: str) -> str:
         "INSECURE_RANDOM": "Use crypto.randomBytes() or crypto.randomUUID() instead of Math.random() for security tokens.",
         "XSS_RISK": "Escape user input before rendering in HTML. Use a template engine with auto-escaping.",
         "INSECURE_DESERIALIZE": "Use safe deserialization methods (e.g. yaml.safe_load, JSON instead of pickle).",
+        # Fix #4: remediation for new pattern types
+        "HARDCODED_ENCRYPTION_KEY": "Move encryption keys to a secrets manager or KMS.",
+        "WEAK_HASHING": "Use SHA-256 or stronger. MD5 and SHA-1 are cryptographically broken.",
+        "PATH_TRAVERSAL": "Validate and sanitize file paths. Use path.resolve() and verify the resolved path is within an allowed directory.",
+        "OPEN_REDIRECT": "Validate redirect URLs against a whitelist of allowed destinations.",
     }
     return remediation_map.get(finding_type, "Review and remediate this security finding.")
 
@@ -671,6 +730,8 @@ def _correct_llm_lines(llm_findings: list, prefilter_hits: list) -> list:
         regex_by_file.setdefault(key, []).append(hit)
 
     corrected = []
+    used_hit_ids = set()  # Fix #1: each regex hit backs at most one LLM finding
+
     for finding in llm_findings:
         f = dict(finding)
         f_file = f.get("file", "")
@@ -682,6 +743,8 @@ def _correct_llm_lines(llm_findings: list, prefilter_hits: list) -> list:
         best_distance = float("inf")
 
         for hit in hits_in_file:
+            if id(hit) in used_hit_ids:  # Fix #1: skip already-claimed hits
+                continue
             h_type = hit["type"]
             h_line = hit.get("diff_line", 0)
 
@@ -696,13 +759,15 @@ def _correct_llm_lines(llm_findings: list, prefilter_hits: list) -> list:
                 best_distance = distance
                 best_match = hit
 
-        if best_match and best_distance > 0:
-            old_line = f_line
-            f["line"] = best_match["diff_line"]
-            log.debug(
-                f"Corrected LLM line {old_line} -> {f['line']} for "
-                f"{f_type} in {f_file}"
-            )
+        if best_match:
+            used_hit_ids.add(id(best_match))  # Fix #1: always claim, even if distance==0
+            if best_distance > 0:
+                old_line = f_line
+                f["line"] = best_match["diff_line"]
+                log.debug(
+                    f"Corrected LLM line {old_line} -> {f['line']} for "
+                    f"{f_type} in {f_file}"
+                )
 
         corrected.append(f)
 

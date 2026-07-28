@@ -46,19 +46,16 @@ public class DiffExtractorService {
 
     private final WebClient webClient;
 
+
     /**
-     * Fetches the full unified diff for a PR, WITH smart truncation applied.
-     * Returns the diff as a plain string (unified diff format).
+     * Removes the security guard tool's own source files from a diff.
+     * This MUST be called unconditionally — before truncation — so the tool
+     * never scans and flags its own code in unrelated PRs.
      */
-    public String fetchDiff(String repoFullName, Long prNumber) {
-        String rawDiff = fetchRawDiff(repoFullName, prNumber);
-
-        if (rawDiff.length() > MAX_DIFF_CHARS) {
-            log.warn("Diff truncated from {} to ~{} chars", rawDiff.length(), MAX_DIFF_CHARS);
-            return smartTruncateDiff(rawDiff);
-        }
-
-        return rawDiff;
+    public String excludeSelfReferentialFiles(String diff) {
+        return splitDiffByFile(diff).stream()
+                .filter(chunk -> !isSelfReferentialFile(chunk))
+                .collect(Collectors.joining());
     }
 
     /**
@@ -147,6 +144,9 @@ public class DiffExtractorService {
      *   5. If still over budget, hard-truncate at a file boundary
      */
     public String smartTruncateDiff(String diff) {
+        // NOTE: self-referential files are already stripped by
+        // excludeSelfReferentialFiles() before this method is called.
+        // This method only handles truncation budget prioritization.
         List<String> fileChunks = splitDiffByFile(diff);
 
         List<String> highPriority = new ArrayList<>();
@@ -203,25 +203,31 @@ public class DiffExtractorService {
     }
 
     /**
-     * Determines if a diff chunk is low-priority for security scanning.
-     * Extracts the file path from the "diff --git a/path b/path" header.
+     * Determines if a diff chunk belongs to the security guard tool's own source.
+     * These files are ALWAYS excluded — they must never be scanned.
      */
-    private boolean isLowPriority(String chunk) {
-        // Extract file path from first line: "diff --git a/path/file b/path/file"
+    public boolean isSelfReferentialFile(String chunk) {
         String firstLine = chunk.split("\n", 2)[0];
         String filePath = firstLine.toLowerCase();
 
-        // Deprioritize the security guard tool's own source code to avoid budget starvation
-        if (filePath.contains("agent/") || 
-            filePath.contains("webhook-service/src/main/java/com/security/guard/service/") ||
-            filePath.contains("webhook-service/src/main/java/com/security/guard/controller/") ||
-            filePath.contains("webhook-service/src/main/java/com/security/guard/config/") ||
-            filePath.contains("webhook-service/src/main/java/com/security/guard/model/") ||
-            filePath.contains(".gitignore") ||
-            filePath.contains("docker-compose") ||
-            filePath.contains("pr-security-guard-presentation")) {
-            return true;
-        }
+        return filePath.contains("agent/") ||
+               filePath.contains("webhook-service/src/main/java/com/security/guard/service/") ||
+               filePath.contains("webhook-service/src/main/java/com/security/guard/controller/") ||
+               filePath.contains("webhook-service/src/main/java/com/security/guard/config/") ||
+               filePath.contains("webhook-service/src/main/java/com/security/guard/model/") ||
+               filePath.contains(".gitignore") ||
+               filePath.contains("docker-compose") ||
+               filePath.contains("pr-security-guard-presentation");
+    }
+
+    /**
+     * Determines if a diff chunk is low-priority for security scanning.
+     * Low-priority files are deprioritized during truncation budget allocation
+     * but NOT hard-excluded — they still get included if there's budget.
+     */
+    public boolean isLowPriority(String chunk) {
+        String firstLine = chunk.split("\n", 2)[0];
+        String filePath = firstLine.toLowerCase();
 
         // Check against low-priority extensions
         for (String ext : LOW_PRIORITY_EXTENSIONS) {

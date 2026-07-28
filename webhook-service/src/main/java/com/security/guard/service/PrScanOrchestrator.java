@@ -77,6 +77,17 @@ public class PrScanOrchestrator {
                 return;
             }
 
+            // ── Step 2b: Strip the tool's own source files unconditionally ──
+            // This prevents the scanner from flagging agent/nodes.py,
+            // webhook-service code, etc. in every PR — regardless of diff size.
+            rawDiff = diffExtractorService.excludeSelfReferentialFiles(rawDiff);
+
+            if (rawDiff.isBlank()) {
+                log.info("Diff contains only self-referential files | repo={} PR=#{}", repoFullName, prNumber);
+                commentService.setSuccessStatus(repoFullName, headSha, "No scannable diff content.");
+                return;
+            }
+
             // ── Step 3: Build agent scan request ──────────────────────────
             // Fetch full manifest content for each dependency file type that
             // appears in the FULL raw diff (before truncation). Extract the
