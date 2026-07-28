@@ -784,6 +784,9 @@ def _correct_llm_lines(llm_findings: list, prefilter_hits: list) -> list:
 
         if best_match:
             used_hit_ids.add(id(best_match))  # Fix #1: always claim, even if distance==0
+            # Upgrade generic SECRET_EXPOSURE from LLM to specific regex secret type
+            if f_type == "SECRET_EXPOSURE" and best_match["type"] in SECRET_TYPES:
+                f["type"] = best_match["type"]
             if best_distance > 0:
                 old_line = f_line
                 f["line"] = best_match["diff_line"]
