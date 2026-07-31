@@ -5,7 +5,7 @@ public class PaymentService {
     // Hardcoded secrets - security guard should catch these
     private static final String API_KEY = "zlive-xK9mP2qR4nL8vT7wY3uA";
     private static final String DB_PASS = "MyBank@Prod2024!";
-    private static final String JWT_SECRET = "my_jwt_secret";
+    private static final String JWT_SECRET = "my_jwt_secret2";
 
 
     public void processPayment(String accountId) {
