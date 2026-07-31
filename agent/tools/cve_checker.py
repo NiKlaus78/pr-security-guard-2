@@ -254,7 +254,8 @@ def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
             "artifact_id":    artifact_id,
             "version":        version,
             "version_source": version_source,
-            "line_number":    line_num
+            "line_number":    line_num,
+            "ecosystem":      "Maven"
         })
 
     # Step 4: Expand starters with their core transitive dependencies
@@ -280,6 +281,7 @@ def extract_dependencies_from_full_pom(pom_content: str) -> list[dict]:
                         "version":        trans_ver,
                         "version_source": f"transitive_from_{art_id}",
                         "line_number":    dep["line_number"],  # map to the line of the starter
+                        "ecosystem":      "Maven",
                     })
                     log.debug(f"  Expanded transitive: {trans_g}:{trans_a}:{trans_ver} from {art_id}")
 
@@ -321,35 +323,159 @@ def extract_dependencies_from_diff(diff_content: str) -> list[dict]:
                         "artifact_id":    a.group(1).strip(),
                         "version":        ver,
                         "version_source": "diff",
-                        "line_number":    0
+                        "line_number":    0,
+                        "ecosystem":      "Maven"
                     })
     log.info(f"Extracted {len(dependencies)} dependencies from diff (fallback)")
     return dependencies
 
 
+# ── npm (package.json) Dependency Extraction ───────────────────────────────────
+
+def extract_dependencies_from_package_json(package_json_content: str) -> list[dict]:
+    """
+    Extracts dependencies from a Node.js package.json file.
+    Covers both "dependencies" and "devDependencies" sections.
+    npm versions often have prefixes (^1.2.3, ~1.2.3, >=1.2.3) which
+    OSV does not understand — these are stripped to the base version.
+    """
+    import json as json_lib
+
+    dependencies = []
+    try:
+        data = json_lib.loads(package_json_content)
+    except json_lib.JSONDecodeError as e:
+        log.warning(f"Could not parse package.json: {e}")
+        return []
+
+    for section in ("dependencies", "devDependencies"):
+        deps = data.get(section, {})
+        if not isinstance(deps, dict):
+            continue
+        for name, version_spec in deps.items():
+            clean_version = _strip_npm_version_prefix(version_spec)
+            if not clean_version:
+                log.debug(f"Skipping unresolvable npm version: {name}@{version_spec}")
+                continue
+            dependencies.append({
+                "group_id":       "",            # npm packages have no groupId
+                "artifact_id":    name,
+                "version":        clean_version,
+                "version_source": "explicit",
+                "line_number":    0,              # JSON has no stable line mapping
+                "ecosystem":      "npm",
+                "is_dev":         section == "devDependencies"
+            })
+
+    log.info(f"Extracted {len(dependencies)} dependencies from package.json "
+             f"({sum(1 for d in dependencies if d['is_dev'])} devDependencies)")
+    return dependencies
+
+
+def _strip_npm_version_prefix(version_spec: str) -> str | None:
+    """
+    Converts npm semver range specifiers into a concrete version OSV can use.
+    "^4.17.20" → "4.17.20"   "~1.2.3" → "1.2.3"   ">=2.0.0" → "2.0.0"
+    Returns None for ranges that can't be resolved to a single version
+    (e.g. "*", "latest", git URLs, workspace references).
+    """
+    if not version_spec or not isinstance(version_spec, str):
+        return None
+
+    v = version_spec.strip()
+
+    if v in ("*", "latest", "") or v.startswith(("git", "file:", "workspace:", "link:")):
+        return None
+
+    m = re.match(r'^[\^~>=<]*\s*(\d+\.\d+\.\d+(?:[-.][\w]+)?)', v)
+    if m:
+        return m.group(1)
+
+    return None
+
+
+# ── PyPI (requirements.txt) Dependency Extraction ───────────────────────────────
+
+def extract_dependencies_from_requirements_txt(requirements_content: str) -> list[dict]:
+    """
+    Extracts dependencies from a Python requirements.txt file.
+    Handles standard pinned format: package==1.2.3
+    Skips unpinned (package>=1.0), comments, and -r/-e includes.
+    """
+    dependencies = []
+
+    for line_num, line in enumerate(requirements_content.split('\n'), 1):
+        line = line.strip()
+
+        if not line or line.startswith('#') or line.startswith('-'):
+            continue
+
+        m = re.match(r'^([a-zA-Z0-9_.\-]+)(?:\[[\w,]+\])?\s*==\s*([a-zA-Z0-9.\-+]+)', line)
+        if not m:
+            log.debug(f"Skipping unpinned/unparsable requirement: {line}")
+            continue
+
+        package_name = m.group(1).strip()
+        version      = m.group(2).strip()
+
+        dependencies.append({
+            "group_id":       "",
+            "artifact_id":    package_name,
+            "version":        version,
+            "version_source": "explicit",
+            "line_number":    line_num,
+            "ecosystem":      "PyPI",
+            "is_dev":         False
+        })
+
+    log.info(f"Extracted {len(dependencies)} dependencies from requirements.txt")
+    return dependencies
+
+
 # ── OSV API — Two-Step Lookup with Parallel Fetching ──────────────────────────
+
+def _build_osv_query(dep: dict) -> dict:
+    """
+    Builds an OSV query, formatting the package name correctly per ecosystem.
+    Maven uses "groupId:artifactId"; npm and PyPI use just the package name.
+    """
+    ecosystem = dep.get("ecosystem", "Maven")
+    if ecosystem == "Maven":
+        package_name = f"{dep['group_id']}:{dep['artifact_id']}"
+    else:
+        package_name = dep["artifact_id"]
+
+    return {
+        "version": dep["version"],
+        "package": {
+            "name":      package_name,
+            "ecosystem": ecosystem
+        }
+    }
+
+
+def _dep_display_name(dep: dict) -> str:
+    """Human-readable dependency coordinates for logging and evidence text."""
+    ecosystem = dep.get("ecosystem", "Maven")
+    if ecosystem == "Maven":
+        return f"{dep['group_id']}:{dep['artifact_id']}:{dep['version']}"
+    return f"{dep['artifact_id']}@{dep['version']}"
+
 
 def check_dependencies_for_cves(dependencies: list[dict]) -> list[dict]:
     """
     Step 1: OSV batch query → get vulnerability IDs per dependency
     Step 2: Parallel fetch full details → extract severity + CVE alias
     Returns deduplicated list (one finding per dependency, not per CVE).
+
+    Supports multiple ecosystems in a single batch — Maven, npm, PyPI.
     """
     if not dependencies:
         return []
 
     log.info(f"OSV batch query for {len(dependencies)} dependencies...")
 
-    queries = [
-        {
-            "version": dep["version"],
-            "package": {
-                "name":      f"{dep['group_id']}:{dep['artifact_id']}",
-                "ecosystem": "Maven"
-            }
-        }
-        for dep in dependencies
-    ]
+    queries = [_build_osv_query(dep) for dep in dependencies]
 
     try:
         resp = httpx.post(OSV_BATCH_URL, json={"queries": queries}, timeout=REQUEST_TIMEOUT)
@@ -365,9 +491,9 @@ def check_dependencies_for_cves(dependencies: list[dict]) -> list[dict]:
     # Map vuln_id → dep
     vuln_to_dep: dict[str, dict] = {}
     for dep, result in zip(dependencies, batch_results):
-        dep_key = f"{dep['group_id']}:{dep['artifact_id']}:{dep['version']}"
+        dep_key = _dep_display_name(dep)
         vulns = result.get("vulns", [])
-        log.info(f"  {dep_key} [{dep['version_source']}] → {len(vulns)} vulns")
+        log.info(f"  {dep_key} [{dep.get('ecosystem','?')}/{dep['version_source']}] → {len(vulns)} vulns")
         for v in vulns:
             vid = v.get("id", "")
             if vid and vid not in vuln_to_dep:
@@ -476,15 +602,22 @@ def _build_finding(vuln: dict, dep: dict) -> dict | None:
     if severity == "LOW":
         return None
 
-    dep_coords  = f"{dep['group_id']}:{dep['artifact_id']}:{dep['version']}"
+    dep_coords  = _dep_display_name(dep)
     version_src = dep.get("version_source", "")
-    note        = " (BOM-resolved version)" if version_src == "bom" else ""
+    note        = " (BOM-resolved version)" if version_src == "bom" else \
+                  f" ({version_src.replace('_', ' ')})" if version_src.startswith("transitive") else ""
+
+    default_file = {
+        "Maven": "pom.xml",
+        "npm":   "package.json",
+        "PyPI":  "requirements.txt"
+    }.get(dep.get("ecosystem", "Maven"), "pom.xml")
 
     return {
         "finding_id":  f"cve_{cve_id.replace('-', '_').replace(':', '_').lower()}",
         "severity":    severity,
         "type":        "VULN_DEPENDENCY",
-        "file":        dep.get("pom_path", "pom.xml"),
+        "file":        dep.get("manifest_path", dep.get("pom_path", default_file)),
         "line":        dep.get("line_number", 0),   # Real line number — PR thread posts work
         "evidence":    f"{dep_coords} → {cve_id}{note}",
         "confidence":  0.97,
@@ -497,6 +630,7 @@ def _build_finding(vuln: dict, dep: dict) -> dict | None:
         "osv_id":     vuln_id,
         "cvss_score": numeric_score or 0.0,
         "summary":    summary[:300],
+        "ecosystem":  dep.get("ecosystem", "Maven"),
     }
 
 
