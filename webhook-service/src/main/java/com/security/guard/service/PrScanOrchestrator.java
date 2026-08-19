@@ -66,25 +66,44 @@ public class PrScanOrchestrator {
                     "PR Security Guard is scanning...");
 
             // ── Step 2: Fetch unified diff ─────────────────────────────────
-            String diffContent = diffExtractorService.fetchDiff(repoFullName, prNumber);
+            // Fetch the FULL raw diff first — we need the complete content to
+            // detect manifest files (pom.xml, package.json, requirements.txt)
+            // even if they appear late in the diff and would be truncated.
+            String rawDiff = diffExtractorService.fetchRawDiff(repoFullName, prNumber);
 
-            if (diffContent.isBlank()) {
+            if (rawDiff.isBlank()) {
                 log.warn("No diff content found | repo={} PR=#{}", repoFullName, prNumber);
                 commentService.setSuccessStatus(repoFullName, headSha, "No diff to scan.");
                 return;
             }
 
+            // ── Step 2b: Strip the tool's own source files unconditionally ──
+            // This prevents the scanner from flagging agent/nodes.py,
+            // webhook-service code, etc. in every PR — regardless of diff size.
+            rawDiff = diffExtractorService.excludeSelfReferentialFiles(rawDiff);
+
+            if (rawDiff.isBlank()) {
+                log.info("Diff contains only self-referential files | repo={} PR=#{}", repoFullName, prNumber);
+                commentService.setSuccessStatus(repoFullName, headSha, "No scannable diff content.");
+                return;
+            }
+
             // ── Step 3: Build agent scan request ──────────────────────────
-            // Fetch full pom.xml content if it appears in the diff.
-            // Extract the ACTUAL path from the diff header — don't assume root-level pom.xml.
-            // e.g. diff could show "webhook-service/pom.xml" not just "pom.xml"
-            String pomXmlContent = "";
-            String pomXmlPath = extractPomXmlPath(diffContent);
-            if (pomXmlPath != null) {
-                log.info("pom.xml detected at '{}' — fetching full file for CVE scan | repo={} PR=#{}",
-                        pomXmlPath, repoFullName, prNumber);
-                pomXmlContent = diffExtractorService.fetchFileContent(
-                        repoFullName, pomXmlPath, headSha);
+            // Fetch full manifest content for each dependency file type that
+            // appears in the FULL raw diff (before truncation). Extract the
+            // ACTUAL path from the diff header — don't assume root-level files.
+            // e.g. diff could show "webhook-service/pom.xml" not just "pom.xml",
+            // or a monorepo could have "backend/package.json" and
+            // "ml-service/requirements.txt" alongside a Java service in the same PR.
+            String pomXmlContent = fetchManifestIfPresent(rawDiff, repoFullName, headSha, "pom.xml");
+            String packageJsonContent = fetchManifestIfPresent(rawDiff, repoFullName, headSha, "package.json");
+            String requirementsTxtContent = fetchManifestIfPresent(rawDiff, repoFullName, headSha, "requirements.txt");
+
+            // Now apply smart truncation for the diff sent to the agent
+            String diffContent = rawDiff;
+            if (rawDiff.length() > 50_000) {
+                log.info("Applying smart truncation to diff | raw={}chars", rawDiff.length());
+                diffContent = diffExtractorService.smartTruncateDiff(rawDiff);
             }
 
             AgentScanRequest request = AgentScanRequest.builder()
@@ -96,6 +115,8 @@ public class PrScanOrchestrator {
                     .prTitle(payload.getPullRequest().getTitle())
                     .diffContent(diffContent)
                     .pomXmlContent(pomXmlContent)
+                    .packageJsonContent(packageJsonContent)
+                    .requirementsTxtContent(requirementsTxtContent)
                     .build();
 
             // ── Step 4: Call Python LangGraph agent ────────────────────────
@@ -228,20 +249,40 @@ public class PrScanOrchestrator {
     }
 
     /**
-     * Extracts the actual pom.xml file path from a unified diff.
-     * Handles cases where pom.xml is in a subdirectory (e.g. webhook-service/pom.xml).
+     * If the given manifest filename appears anywhere in the diff, extracts
+     * its actual repo-relative path (handles monorepo layouts) and fetches
+     * the full file content from GitHub. Returns empty string if not present.
+     */
+    private String fetchManifestIfPresent(String diffContent, String repoFullName,
+                                            String headSha, String manifestFilename) {
+        String manifestPath = extractManifestPath(diffContent, manifestFilename);
+        if (manifestPath == null) {
+            return "";
+        }
+
+        log.info("{} detected at '{}' — fetching full file for CVE scan | repo={}",
+                manifestFilename, manifestPath, repoFullName);
+
+        return diffExtractorService.fetchFileContent(repoFullName, manifestPath, headSha);
+    }
+
+    /**
+     * Extracts the actual manifest file path from a unified diff.
+     * Handles cases where the file is in a subdirectory (e.g. webhook-service/pom.xml,
+     * node-service/package.json, ml-service/requirements.txt).
      *
      * Looks for lines like:
      *   diff --git a/webhook-service/pom.xml b/webhook-service/pom.xml
+     *   diff --git a/node-service/package.json b/node-service/package.json
      */
-    private String extractPomXmlPath(String diffContent) {
+    private String extractManifestPath(String diffContent, String filename) {
         for (String line : diffContent.split("\n")) {
-            if (line.startsWith("diff --git") && line.contains("pom.xml")) {
-                // Format: "diff --git a/path/pom.xml b/path/pom.xml"
+            if (line.startsWith("diff --git") && line.contains(filename)) {
+                // Format: "diff --git a/path/file b/path/file"
                 // Extract the b/ path (the new version)
                 String[] parts = line.split(" ");
                 for (String part : parts) {
-                    if (part.startsWith("b/") && part.endsWith("pom.xml")) {
+                    if (part.startsWith("b/") && part.endsWith(filename)) {
                         return part.substring(2); // Strip the "b/" prefix
                     }
                 }

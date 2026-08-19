@@ -37,7 +37,9 @@ class ScanRequest(BaseModel):
     pr_author: str
     pr_title: str
     diff_content: str
-    pom_xml_content: str = ""    # Full pom.xml content when present in diff
+    pom_xml_content: str = ""               # Full pom.xml content when present in diff
+    package_json_content: str = ""          # Full package.json content when present in diff
+    requirements_txt_content: str = ""      # Full requirements.txt content when present in diff
 
 
 class ScanResponse(BaseModel):
@@ -107,6 +109,8 @@ async def scan_pr(request: ScanRequest):
             "prefilter_hits": [],
             "cve_findings": [],
             "pom_xml_content": request.pom_xml_content,
+            "package_json_content": request.package_json_content,
+            "requirements_txt_content": request.requirements_txt_content,
             "raw_findings": [],
             "critiqued_findings": [],
             "final_findings": [],

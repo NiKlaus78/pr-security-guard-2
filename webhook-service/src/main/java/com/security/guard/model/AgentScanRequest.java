@@ -38,4 +38,10 @@ public class AgentScanRequest {
 
     @JsonProperty("pom_xml_content")
     private String pomXmlContent;    // Full pom.xml content when changed in PR
+
+    @JsonProperty("package_json_content")
+    private String packageJsonContent;         // Full package.json content when changed in PR
+
+    @JsonProperty("requirements_txt_content")
+    private String requirementsTxtContent;     // Full requirements.txt content when changed in PR
 }

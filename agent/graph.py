@@ -1,8 +1,11 @@
 """
 LangGraph Security Pipeline
 
-Defines the agent graph with 4 sequential nodes:
-  regex_prefilter → llm_analyzer → self_reflection → gate_decision
+Defines the agent graph with 5 sequential nodes:
+  regex_prefilter → dependency_scanner → llm_analyzer → self_reflection → gate_decision
+
+dependency_scanner covers Maven (pom.xml), npm (package.json), and
+PyPI (requirements.txt) — detected independently per PR diff.
 
 State flows through each node, accumulating findings.
 LangSmith tracing is attached at the graph level.
@@ -32,12 +35,13 @@ class SecurityScanState(TypedDict):
     pr_author: str
     pr_title: str
     diff_content: str
-    pom_xml_content: str              # Full pom.xml content when present in diff
+    pom_xml_content: str               # Full pom.xml content when present in diff
+    package_json_content: str          # Full package.json content when present in diff
+    requirements_txt_content: str      # Full requirements.txt content when present in diff
 
     # Pipeline outputs (accumulate through nodes)
     prefilter_hits: List[dict]       # Fast regex hits
-    cve_findings: List[dict]          # OSV vulnerability scan results (CVEs)
-    dep_scan_findings: List[dict]     # OSV vulnerability scan results
+    cve_findings: List[dict]          # OSV vulnerability scan results (CVEs) — Maven/npm/PyPI
     raw_findings: List[dict]          # LLM initial findings
     critiqued_findings: List[dict]    # After self-reflection
     final_findings: List[dict]        # After gate decision (with gate_action set)

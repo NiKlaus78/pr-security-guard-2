@@ -5,10 +5,11 @@ Each function is a node in the security scan graph.
 Nodes receive the full state dict and return a partial update.
 
 Nodes:
-  1. regex_prefilter_node    — fast regex, no LLM
-  2. llm_analyzer_node       — Claude Sonnet security analysis
-  3. self_reflection_node    — Claude Sonnet self-critique loop
-  4. gate_decision_node      — apply thresholds, set BLOCK/WARN/ALLOW
+  1. regex_prefilter_node    — fast regex, no LLM (language agnostic)
+  2. cve_scanner_node        — Maven / npm / PyPI dependency CVE scanning
+  3. llm_analyzer_node       — Mistral Codestral security analysis
+  4. self_reflection_node    — Mistral self-critique loop
+  5. gate_decision_node      — apply thresholds, set BLOCK/WARN/ALLOW
 """
 
 import os
@@ -26,61 +27,124 @@ from prompts.critique import CRITIQUE_SYSTEM_PROMPT, build_critique_user_prompt
 from tools.cve_checker import (
     extract_dependencies_from_diff,
     extract_dependencies_from_full_pom,
-    check_dependencies_for_cves
+    extract_dependencies_from_package_json,
+    extract_dependencies_from_requirements_txt,
+    check_dependencies_for_cves,
 )
 
 log = logging.getLogger(__name__)
 
-# Confidence thresholds
 BLOCK_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", "0.85"))
 WARN_THRESHOLD = 0.60
 
-# LLM setup — Mistral Codestral, code-specialist model
 llm = ChatMistralAI(
     model="codestral-latest",
-    max_tokens=8192,          # Increased — large diffs need more output tokens
-    temperature=0,            # Deterministic for security analysis
+    max_tokens=8192,
+    temperature=0,
     api_key=os.getenv("MISTRAL_API_KEY")
 )
 
 
 # ── Node 1: Regex Pre-filter ───────────────────────────────────────────────────
+# Language-agnostic — secrets look the same whether in Java, JS, or Python.
 
-# Compiled patterns for speed — only match added lines (starting with +)
 SECRET_PATTERNS = [
     (re.compile(r'(?i)(password|passwd|pwd)\s*[=:]\s*["\']?[^\s"\']{6,}'), "HARDCODED_PASSWORD", "CRITICAL"),
     (re.compile(r'(?i)(api[_-]?key|apikey)\s*[=:]\s*["\']?[A-Za-z0-9_\-]{16,}'), "HARDCODED_API_KEY", "CRITICAL"),
     (re.compile(r'AKIA[0-9A-Z]{16}'), "AWS_ACCESS_KEY", "CRITICAL"),
     (re.compile(r'(?i)aws[_-]?secret[_-]?access[_-]?key\s*[=:]\s*["\']?[A-Za-z0-9/+=]{40}'), "AWS_SECRET_KEY", "CRITICAL"),
-    (re.compile(r'sk-[a-zA-Z0-9]{32,}'), "OPENAI_API_KEY", "CRITICAL"),
+    (re.compile(r'sk-[a-zA-Z0-9]{32,}'), "API_KEY_PATTERN", "CRITICAL"),
     (re.compile(r'-----BEGIN (RSA |EC |DSA )?PRIVATE KEY-----'), "PRIVATE_KEY", "CRITICAL"),
-    (re.compile(r'(?i)(secret|token)\s*[=:]\s*["\']?[A-Za-z0-9_\-]{16,}'), "HARDCODED_SECRET", "HIGH"),
-    (re.compile(r'jdbc:[a-z]+://[^:]+:[^@]+@'), "DB_CREDENTIALS_IN_URL", "CRITICAL"),
+    (re.compile(r'(?i)(secret|token)\s*[=:]\s*["\']?[A-Za-z0-9_\-!@#$%^&*+=.]{16,}'), "HARDCODED_SECRET", "HIGH"),
+    (re.compile(r'(?i)(jdbc|mongodb|postgres|mysql)://[^:]+:[^@]+@'), "DB_CREDENTIALS_IN_URL", "CRITICAL"),
     (re.compile(r'(?i)ghp_[A-Za-z0-9]{36}'), "GITHUB_TOKEN", "CRITICAL"),
     (re.compile(r'eyJ[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_=]+\.[A-Za-z0-9\-_.+/=]*'), "HARDCODED_JWT", "HIGH"),
+    # Fix #4: ENCRYPTION_KEY variable naming
+    (re.compile(r"""(?i)(encryption[_-]?key|encrypt[_-]?key)\s*[=:]\s*["']?[A-Za-z0-9_\-!@#$%^&*+=.]{8,}"""), "HARDCODED_ENCRYPTION_KEY", "CRITICAL"),
+]
+
+# ── Dangerous function call patterns ────────────────────────────────────────
+# LLM-only findings (SQL injection, eval, deserialization) have no database
+# safety net like CVEs do — Mistral under-reports these inconsistently.
+# This regex floor guarantees well-known dangerous one-liners are always
+# caught, language-agnostic (Java, JavaScript, Python).
+
+DANGEROUS_CALL_PATTERNS = [
+    # ── Command injection (specific patterns first, before generic exec) ─────
+    (re.compile(r'(?i)subprocess\.(run|call|popen|check_output)\s*\([^)]*shell\s*=\s*True'), "COMMAND_INJECTION", "HIGH"),
+    (re.compile(r'(?i)\bos\.system\s*\('), "COMMAND_INJECTION", "HIGH"),
+    (re.compile(r'(?i)(child_process\.)?exec(Sync)?\s*\([^)]*\+'), "COMMAND_INJECTION", "HIGH"),
+    (re.compile(r'Runtime\.getRuntime\(\)\.exec\s*\('), "COMMAND_INJECTION", "HIGH"),
+    # ── Generic eval/exec (AFTER specific patterns to avoid shadowing) ───────
+    (re.compile(r'(?i)\beval\s*\('), "EVAL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)\bexec\s*\('), "EVAL_INJECTION", "HIGH"),
+    # ── Deserialization ──────────────────────────────────────────────────────
+    (re.compile(r'(?i)pickle\.loads?\s*\('), "INSECURE_DESERIALIZE", "HIGH"),
+    (re.compile(r'(?i)yaml\.load\s*\('), "INSECURE_DESERIALIZE", "MEDIUM"),
+    (re.compile(r'new\s+ObjectInputStream\s*\('), "INSECURE_DESERIALIZE", "HIGH"),
+    # ── Auth ─────────────────────────────────────────────────────────────────
+    (re.compile(r'(?i)jwt\.decode\s*\('), "BROKEN_AUTH", "HIGH"),
+    # ── SQL injection ────────────────────────────────────────────────────────
+    (re.compile(r'(?i)(SELECT|INSERT|UPDATE|DELETE)\b[^"\']*["\'][^"\']*["\']?\s*\+\s*\w+'), "SQL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)(SELECT|INSERT|UPDATE|DELETE)\b.*[\'"]\s*%\s*\w+'), "SQL_INJECTION", "HIGH"),
+    (re.compile(r'(?i)f["\'][^"\']*?(SELECT|INSERT|UPDATE|DELETE)\b[^"\']*\{[^}]+\}'), "SQL_INJECTION", "HIGH"),
+    # ── XSS ──────────────────────────────────────────────────────────────────
+    (re.compile(r'(?i)res\.(send|write)\s*\([^)]*req\.(query|body|params)'), "XSS_RISK", "MEDIUM"),
+    (re.compile(r'(?i)res\.(send|write)\s*\([^)]*(<[a-z][^>]*>|["\']\s*\+)'), "XSS_RISK", "MEDIUM"),
+    # ── CORS / randomness ────────────────────────────────────────────────────
+    (re.compile(r'''(?i)['"]Access-Control-Allow-Origin['"]\s*,\s*['"]\*['"]'''), "CORS_WILDCARD", "MEDIUM"),
+    (re.compile(r'(?i)\bMath\.random\s*\('), "INSECURE_RANDOM", "MEDIUM"),
+    # ── Fix #4: Weak hashing ─────────────────────────────────────────────────
+    (re.compile(r"""(?i)(?:crypto\.createHash|MessageDigest\.getInstance|hashlib\.(?:md5|sha1))\s*\(\s*['"]?(md5|sha1)['"]?\s*\)"""), "WEAK_HASHING", "MEDIUM"),
+    # ── Fix #4: Path traversal via user-controlled file access ───────────────
+    (re.compile(r"""(?i)(?:fs\.readFile(?:Sync)?|fs\.createReadStream|open)\s*\([^)]*(?:req\.(query|body|params|url)|__dirname\s*\+\s*(?:req|user|file|path|input))"""), "PATH_TRAVERSAL", "HIGH"),
+    # ── Fix #4: Open redirect ────────────────────────────────────────────────
+    (re.compile(r'(?i)res\.redirect\s*\([^)]*req\.(query|body|params)'), "OPEN_REDIRECT", "MEDIUM"),
 ]
 
 CVV_LOG_PATTERN = re.compile(r'(?i)(log|print|console)\s*[\.\(].*?(cvv|card.?number|pan|ssn)', re.DOTALL)
-SQL_INJECT_PATTERN = re.compile(r'(?i)(["\']\s*\+\s*\w+|string\.format\s*\(.*?select|"SELECT.*?" \+)', re.DOTALL)
+
+
+# Regex to parse unified diff hunk headers: @@ -old_start[,old_len] +new_start[,new_len] @@
+_HUNK_HEADER_RE = re.compile(r'@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@')
 
 
 def regex_prefilter_node(state: dict) -> dict:
-    """
-    Fast regex pre-filter. No LLM calls. Runs in milliseconds.
-    Finds obvious secrets and flags them to inform the LLM analyzer.
-    """
+    """Fast regex pre-filter. No LLM calls. Language-agnostic."""
     log.info(f"[{state['scan_id']}] Node: regex_prefilter")
 
     diff = state["diff_content"]
     hits = []
 
-    # Only scan added lines (lines starting with + but not +++)
     added_lines = []
-    for i, line in enumerate(diff.split("\n"), 1):
-        if line.startswith("+") and not line.startswith("+++"):
-            added_lines.append((i, line[1:]))  # Strip leading +
+    current_file = "unknown"
+    current_new_line = None  # Tracks actual source file line number
+    for line in diff.split("\n"):
+        if line.startswith("diff --git"):
+            # Extract "b/path/to/file.ext" -> "path/to/file.ext"
+            parts = line.split(" ")
+            for p in parts:
+                if p.startswith("b/"):
+                    current_file = p[2:]
+                    break
+            current_new_line = None  # Reset on new file
+        elif line.startswith("@@"):
+            # Parse hunk header: @@ -old_start,old_len +new_start,new_len @@
+            m = _HUNK_HEADER_RE.search(line)
+            if m:
+                current_new_line = int(m.group(1))
+        elif line.startswith("+") and not line.startswith("+++"):
+            if current_new_line is not None:
+                added_lines.append((current_new_line, line[1:], current_file))
+                current_new_line += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            pass  # Deleted lines don't increment the new-file line counter
+        else:
+            # Context line (unchanged) — increments the new-file line counter
+            if current_new_line is not None:
+                current_new_line += 1
 
-    for line_num, line_content in added_lines:
+    for line_num, line_content, file_path in added_lines:
         for pattern, finding_type, severity in SECRET_PATTERNS:
             if pattern.search(line_content):
                 hits.append({
@@ -88,87 +152,172 @@ def regex_prefilter_node(state: dict) -> dict:
                     "severity": severity,
                     "line_content": line_content.strip(),
                     "diff_line": line_num,
+                    "file": file_path,
                     "source": "regex_prefilter"
                 })
-                break  # One hit per line is enough
+                break
 
-        # Check CVV logging
+        for pattern, finding_type, severity in DANGEROUS_CALL_PATTERNS:
+            if pattern.search(line_content):
+                hits.append({
+                    "type": finding_type,
+                    "severity": severity,
+                    "line_content": line_content.strip(),
+                    "diff_line": line_num,
+                    "file": file_path,
+                    "source": "regex_dangerous_call"
+                })
+                break
+
         if CVV_LOG_PATTERN.search(line_content):
             hits.append({
                 "type": "PCI_DATA_IN_LOGS",
                 "severity": "HIGH",
                 "line_content": line_content.strip(),
                 "diff_line": line_num,
+                "file": file_path,
                 "source": "regex_prefilter"
             })
+
+    # ── Fix #5 (generalized): Taint-tracking lookback for assign-then-use ───
+    # Many dangerous patterns use a two-step idiom:
+    #   const x = req.query.x;   // taint source
+    #   res.send(... + x + ...)  // dangerous sink
+    # Single-line regex misses these. This lookback checks each dangerous sink
+    # for a tainted variable assigned from req.query/body/params within 5 lines.
+    _REQ_ASSIGN_RE = re.compile(r'(?:const|let|var)\s+(\w+)\s*=\s*req\.(query|body|params)[\.\[]')
+
+    # (sink_regex, finding_type, severity, source_label)
+    _TAINT_SINKS = [
+        (re.compile(r'res\.(send|write)\s*\('),                          "XSS_RISK",       "MEDIUM", "regex_xss_lookback"),
+        (re.compile(r'res\.redirect\s*\('),                              "OPEN_REDIRECT",   "MEDIUM", "regex_redirect_lookback"),
+        (re.compile(r'(?:fs\.readFile(?:Sync)?|fs\.createReadStream)\s*\('), "PATH_TRAVERSAL",  "HIGH",   "regex_path_lookback"),
+    ]
+
+    for idx, (line_num, line_content, file_path) in enumerate(added_lines):
+        for sink_re, finding_type, severity, source_label in _TAINT_SINKS:
+            if not sink_re.search(line_content):
+                continue
+            # Look back up to 5 lines in the same file for a tainted variable
+            for lookback in range(1, 6):
+                prev_idx = idx - lookback
+                if prev_idx < 0:
+                    break
+                prev_line_num, prev_content, prev_file = added_lines[prev_idx]
+                if prev_file != file_path:
+                    break
+                m = _REQ_ASSIGN_RE.search(prev_content)
+                if m:
+                    var_name = m.group(1)
+                    if var_name in line_content:
+                        already = any(
+                            h["file"] == file_path and h["diff_line"] == line_num and h["type"] == finding_type
+                            for h in hits
+                        )
+                        if not already:
+                            hits.append({
+                                "type": finding_type,
+                                "severity": severity,
+                                "line_content": line_content.strip(),
+                                "diff_line": line_num,
+                                "file": file_path,
+                                "source": source_label
+                            })
+                        break
 
     log.info(f"[{state['scan_id']}] Regex hits: {len(hits)}")
     return {"prefilter_hits": hits}
 
 
-# ── Node 2: CVE Scanner ────────────────────────────────────────────────────────
+# ── Node 2: CVE Scanner — Multi-Language ───────────────────────────────────────
 
 def cve_scanner_node(state: dict) -> dict:
     """
-    Scans pom.xml for Maven dependencies and queries OSV API for known CVEs.
+    Scans dependency manifest files for known CVEs via OSV API.
+    Supports three ecosystems detected from the diff:
+      pom.xml          → Maven  (Java)
+      package.json     → npm    (JavaScript / Node.js)
+      requirements.txt → PyPI   (Python)
 
-    Uses the FULL pom.xml content (not just the diff) so that pre-existing
-    vulnerable dependencies are also caught — not just newly added ones.
+    Uses the FULL manifest content (not just the diff) so pre-existing
+    vulnerable dependencies are caught, not just newly added ones.
     """
     log.info(f"[{state['scan_id']}] Node: cve_scanner")
 
     diff = state["diff_content"]
+    all_dependencies = []
+
+    # ── Maven: pom.xml ──────────────────────────────────────────────────────
     pom_xml_content = state.get("pom_xml_content", "")
+    if "pom.xml" in diff:
+        pom_path = _extract_manifest_path(diff, "pom.xml")
+        log.info(f"[{state['scan_id']}] pom.xml detected at '{pom_path}'")
+        if pom_xml_content:
+            deps = extract_dependencies_from_full_pom(pom_xml_content)
+        else:
+            log.warning(f"[{state['scan_id']}] Full pom.xml unavailable — using diff fallback")
+            deps = extract_dependencies_from_diff(diff)
+        for d in deps:
+            d["manifest_path"] = pom_path
+        all_dependencies.extend(deps)
 
-    # Only run if pom.xml is in the diff
-    if "pom.xml" not in diff:
-        log.info(f"[{state['scan_id']}] No pom.xml in diff — skipping CVE scan")
+    # ── npm: package.json ───────────────────────────────────────────────────
+    package_json_content = state.get("package_json_content", "")
+    if "package.json" in diff:
+        pkg_path = _extract_manifest_path(diff, "package.json")
+        log.info(f"[{state['scan_id']}] package.json detected at '{pkg_path}'")
+        if package_json_content:
+            deps = extract_dependencies_from_package_json(package_json_content)
+            for d in deps:
+                d["manifest_path"] = pkg_path
+            all_dependencies.extend(deps)
+        else:
+            log.warning(f"[{state['scan_id']}] Full package.json unavailable — skipping npm CVE scan")
+
+    # ── PyPI: requirements.txt ──────────────────────────────────────────────
+    requirements_content = state.get("requirements_txt_content", "")
+    if "requirements.txt" in diff:
+        req_path = _extract_manifest_path(diff, "requirements.txt")
+        log.info(f"[{state['scan_id']}] requirements.txt detected at '{req_path}'")
+        if requirements_content:
+            deps = extract_dependencies_from_requirements_txt(requirements_content)
+            for d in deps:
+                d["manifest_path"] = req_path
+            all_dependencies.extend(deps)
+        else:
+            log.warning(f"[{state['scan_id']}] Full requirements.txt unavailable — skipping PyPI CVE scan")
+
+    if not all_dependencies:
+        log.info(f"[{state['scan_id']}] No dependency manifests found in diff — skipping CVE scan")
         return {"cve_findings": []}
 
-    # Extract actual pom.xml path from diff header (e.g. "webhook-service/pom.xml")
-    pom_path = "pom.xml"
-    for line in diff.split("\n"):
-        if line.startswith("diff --git") and "pom.xml" in line:
-            parts = line.split()
-            for p in parts:
-                if p.startswith("b/") and p.endswith("pom.xml"):
-                    pom_path = p[2:]  # strip "b/"
-                    break
-            break
-    log.info(f"[{state['scan_id']}] pom.xml path in repo: {pom_path}")
+    log.info(
+        f"[{state['scan_id']}] Checking {len(all_dependencies)} dependencies "
+        f"across {len({d.get('ecosystem') for d in all_dependencies})} ecosystem(s) against OSV..."
+    )
 
-    # Prefer full pom.xml content over diff — catches ALL deps, not just new ones
-    if pom_xml_content:
-        log.info(
-            f"[{state['scan_id']}] Using full pom.xml content "
-            f"({len(pom_xml_content)} chars) — scanning ALL dependencies"
-        )
-        dependencies = extract_dependencies_from_full_pom(pom_xml_content)
-    else:
-        log.warning(
-            f"[{state['scan_id']}] Full pom.xml not available — "
-            f"falling back to diff-only"
-        )
-        dependencies = extract_dependencies_from_diff(diff)
-
-    if not dependencies:
-        log.info(f"[{state['scan_id']}] No dependencies found in pom.xml")
-        return {"cve_findings": []}
-
-    # Attach the real pom path to each dep so CVE findings show the correct file
-    for dep in dependencies:
-        dep["pom_path"] = pom_path
-
-    log.info(f"[{state['scan_id']}] Checking {len(dependencies)} dependencies against OSV...")
-
-    cve_findings = check_dependencies_for_cves(dependencies)
+    cve_findings = check_dependencies_for_cves(all_dependencies)
 
     log.info(
         f"[{state['scan_id']}] CVE scan complete | "
-        f"dependencies_checked={len(dependencies)} cves_found={len(cve_findings)}"
+        f"dependencies_checked={len(all_dependencies)} cves_found={len(cve_findings)}"
     )
 
     return {"cve_findings": cve_findings}
+
+
+def _extract_manifest_path(diff_content: str, filename: str) -> str:
+    """
+    Extracts the actual repo-relative path of a manifest file from the diff header.
+    Handles monorepo layouts e.g. "backend/package.json" not just "package.json".
+    """
+    for line in diff_content.split("\n"):
+        if line.startswith("diff --git") and filename in line:
+            parts = line.split()
+            for p in parts:
+                if p.startswith("b/") and p.endswith(filename):
+                    return p[2:]
+    return filename
 
 
 # ── Node 3: LLM Security Analyzer ─────────────────────────────────────────────
@@ -176,7 +325,7 @@ def cve_scanner_node(state: dict) -> dict:
 def llm_analyzer_node(state: dict) -> dict:
     """
     Deep LLM semantic analysis using Mistral Codestral.
-    Receives diff + prefilter hints + confirmed CVEs → returns structured findings JSON.
+    Language-agnostic prompt — works across Java, JavaScript, Python, etc.
     """
     log.info(f"[{state['scan_id']}] Node: llm_analyzer")
 
@@ -197,14 +346,12 @@ def llm_analyzer_node(state: dict) -> dict:
         response = llm.invoke(messages)
         raw_text = response.content
 
-        # Strip markdown fences — Codestral sometimes wraps output in ```json
         clean_json = raw_text.strip()
         if clean_json.startswith("```"):
             clean_json = re.sub(r"```(?:json)?\n?", "", clean_json).strip()
         if clean_json.endswith("```"):
             clean_json = clean_json[:-3].strip()
 
-        # Handle case where model prepends prose before the array
         bracket_start = clean_json.find("[")
         if bracket_start > 0:
             log.warning(f"[{state['scan_id']}] Stripping prose before JSON array")
@@ -212,29 +359,25 @@ def llm_analyzer_node(state: dict) -> dict:
 
         findings = json.loads(clean_json)
 
-        # Ensure it's a list
         if isinstance(findings, dict):
             findings = findings.get("findings", [findings])
 
         log.info(f"[{state['scan_id']}] LLM raw findings: {len(findings)}")
 
-        # Remove any LLM-hallucinated or duplicated CVE findings
-        findings = [f for f in findings if f.get("type") != "VULN_DEPENDENCY"]
-
-        # ── Regex-merge safety net ────────────────────────────────────────────
-        # If Mistral returned fewer findings than regex hits, it under-reported.
         prefilter_hits = state.get("prefilter_hits", [])
-        if len(findings) < len(prefilter_hits):
-            log.warning(
-                f"[{state['scan_id']}] Mistral returned {len(findings)} findings "
-                f"but regex found {len(prefilter_hits)} hits — merging missing ones"
-            )
+        if prefilter_hits:
+            # Always correct LLM line numbers using precise regex data
+            findings = _correct_llm_lines(findings, prefilter_hits)
+            # Always merge — regex hits are deterministic and reliable;
+            # the LLM can return more findings yet still miss specific ones.
+            pre_merge = len(findings)
             findings = _merge_regex_into_findings(findings, prefilter_hits)
-            log.info(f"[{state['scan_id']}] After regex merge: {len(findings)} findings")
+            if len(findings) > pre_merge:
+                log.info(
+                    f"[{state['scan_id']}] Regex merge added "
+                    f"{len(findings) - pre_merge} findings (LLM={pre_merge}, regex={len(prefilter_hits)})"
+                )
 
-        # ── CVE merge ────────────────────────────────────────────────────────
-        # Always inject confirmed OSV CVE findings — these are facts, not LLM guesses.
-        # The LLM may have already mentioned them, so we deduplicate by pom.xml line.
         cve_findings = state.get("cve_findings", [])
         if cve_findings:
             findings = _merge_cve_into_findings(findings, cve_findings)
@@ -244,88 +387,70 @@ def llm_analyzer_node(state: dict) -> dict:
 
     except json.JSONDecodeError as e:
         log.error(f"[{state['scan_id']}] JSON parse failed: {e}\nRaw: {raw_text[:500]}")
-        # Full fallback — convert all regex hits to findings
-        return {"raw_findings": _prefilter_to_findings(state["prefilter_hits"])}
+        merged = _merge_cve_into_findings(
+            _prefilter_to_findings(state["prefilter_hits"]),
+            state.get("cve_findings", [])
+        )
+        return {"raw_findings": merged}
 
     except Exception as e:
         log.error(f"[{state['scan_id']}] LLM analyzer failed: {e}")
-        return {"raw_findings": _prefilter_to_findings(state.get("prefilter_hits", [])),
-                "errors": state.get("errors", []) + [str(e)]}
+        merged = _merge_cve_into_findings(
+            _prefilter_to_findings(state.get("prefilter_hits", [])),
+            state.get("cve_findings", [])
+        )
+        return {"raw_findings": merged, "errors": state.get("errors", []) + [str(e)]}
 
 
-# ── Node 3: Self-Reflection Critique ──────────────────────────────────────────
+# ── Node 4: Self-Reflection Critique ──────────────────────────────────────────
 
 def self_reflection_node(state: dict) -> dict:
-    """
-    The self-critique loop — Claude Sonnet reviews its own findings
-    and adjusts confidence scores to minimize false positives.
-    """
+    """Self-critique loop — reviews findings to eliminate false positives."""
     log.info(f"[{state['scan_id']}] Node: self_reflection")
 
+    raw_findings = state["raw_findings"]
+    if not raw_findings:
+        log.info(f"[{state['scan_id']}] No findings to critique.")
+        return {"critiqued_findings": []}
+
+    user_prompt = build_critique_user_prompt(
+        findings=raw_findings,
+        diff_content=state["diff_content"]
+    )
+
+    messages = [
+        SystemMessage(content=CRITIQUE_SYSTEM_PROMPT),
+        HumanMessage(content=user_prompt)
+    ]
+
     try:
-        raw_findings = state["raw_findings"]
-        if not raw_findings:
-            log.info(f"[{state['scan_id']}] No findings to critique.")
-            return {"critiqued_findings": []}
+        response = llm.invoke(messages)
+        raw_text = response.content
 
-        # Filter out ground-truth CVE findings from the ones we send to LLM for critique
-        findings_to_critique = [f for f in raw_findings if f.get("type") != "VULN_DEPENDENCY"]
+        clean_json = raw_text.strip()
+        if clean_json.startswith("```"):
+            clean_json = re.sub(r"```(?:json)?\n?", "", clean_json).strip()
 
-        critique_map = {}
-        if findings_to_critique:
-            log.info(f"[{state['scan_id']}] Critiquing {len(findings_to_critique)} non-CVE findings...")
-            user_prompt = build_critique_user_prompt(
-                findings=findings_to_critique,
-                diff_content=state["diff_content"]
-            )
-
-            messages = [
-                SystemMessage(content=CRITIQUE_SYSTEM_PROMPT),
-                HumanMessage(content=user_prompt)
-            ]
-
-            try:
-                response = llm.invoke(messages)
-                raw_text = response.content
-
-                clean_json = raw_text.strip()
-                if clean_json.startswith("```"):
-                    clean_json = re.sub(r"```(?:json)?\n?", "", clean_json).strip()
-
-                critiques = json.loads(clean_json)
-                critique_map = {c["finding_id"]: c for c in critiques}
-            except Exception as e:
-                log.error(f"[{state['scan_id']}] Self-reflection LLM call failed: {e}")
-        else:
-            log.info(f"[{state['scan_id']}] No non-CVE findings to critique. Skipping critique LLM.")
+        critiques = json.loads(clean_json)
+        critique_map = {c["finding_id"]: c for c in critiques}
 
         critiqued = []
         for finding in raw_findings:
             fid = finding.get("finding_id", str(uuid.uuid4())[:8])
             finding["finding_id"] = fid
 
-            if finding.get("type") == "VULN_DEPENDENCY":
-                # CVE findings are database facts — auto-confirm and preserve their high confidence
-                critiqued.append({
-                    **finding,
-                    "initial_confidence": finding.get("confidence", 0.97),
-                    "final_confidence": finding.get("confidence", 0.97),
-                    "critique_verdict": "CONFIRMED",
-                    "critique_rationale": "Factual CVE finding from OSV database — skipped critique."
-                })
-            else:
-                critique = critique_map.get(fid, {})
-                initial_confidence = finding.get("confidence", 0.7)
-                adjustment = critique.get("confidence_adjustment", 0.0)
-                final_confidence = max(0.0, min(1.0, initial_confidence + adjustment))
+            critique = critique_map.get(fid, {})
+            initial_confidence = finding.get("confidence", 0.7)
+            adjustment = critique.get("confidence_adjustment", 0.0)
+            final_confidence = max(0.0, min(1.0, initial_confidence + adjustment))
 
-                critiqued.append({
-                    **finding,
-                    "initial_confidence": initial_confidence,
-                    "final_confidence": final_confidence,
-                    "critique_verdict": critique.get("verdict", "CONFIRMED"),
-                    "critique_rationale": critique.get("rationale", "No critique provided.")
-                })
+            critiqued.append({
+                **finding,
+                "initial_confidence": initial_confidence,
+                "final_confidence": final_confidence,
+                "critique_verdict": critique.get("verdict", "CONFIRMED"),
+                "critique_rationale": critique.get("rationale", "No critique provided.")
+            })
 
         false_positives = sum(1 for f in critiqued if f["critique_verdict"] == "FALSE_POSITIVE")
         log.info(
@@ -336,51 +461,109 @@ def self_reflection_node(state: dict) -> dict:
 
     except Exception as e:
         log.error(f"[{state['scan_id']}] Self-reflection failed: {e}")
-        # If critique fails, pass raw findings through unchanged
         return {
             "critiqued_findings": raw_findings,
             "errors": state.get("errors", []) + [f"critique_failed: {str(e)}"]
         }
 
 
-# ── Node 4: Gate Decision ──────────────────────────────────────────────────────
+# ── Node 5: Gate Decision ──────────────────────────────────────────────────────
 
 def gate_decision_node(state: dict) -> dict:
-    """
-    Applies confidence thresholds to determine gate action per finding
-    and the overall merge decision.
+    """Applies confidence thresholds to determine gate action and merge decision.
 
-    Threshold logic:
-      final_confidence >= 0.85 AND verdict != FALSE_POSITIVE → BLOCK (if CRITICAL/HIGH)
-      final_confidence >= 0.60 AND verdict != FALSE_POSITIVE → WARN
-      else                                                   → DISCARD
+    SAFETY NET: After processing critiqued findings, any regex prefilter hit
+    that is NOT represented in the final output is injected directly.
+    The regex prefilter is deterministic — its findings MUST appear.
     """
     log.info(f"[{state['scan_id']}] Node: gate_decision")
 
     critiqued = state["critiqued_findings"]
+    prefilter_hits = state.get("prefilter_hits", [])
     final_findings = []
     has_block = False
     has_warn = False
 
+    log.info(
+        f"[{state['scan_id']}] Gate input: "
+        f"critiqued_findings={len(critiqued)}, prefilter_hits={len(prefilter_hits)}"
+    )
+
+    # Build a lookup of regex-backed patterns for fast checking.
+    regex_backing = _build_regex_backing(prefilter_hits)
+
     for finding in critiqued:
-        confidence = finding.get("final_confidence", 0.0)
+        confidence = finding.get("final_confidence", finding.get("confidence", 0.0))
         verdict = finding.get("critique_verdict", "CONFIRMED")
         severity = finding.get("severity", "MEDIUM")
 
+        # Check if this finding is backed by a regex prefilter hit
+        is_regex_backed = _is_regex_backed(finding, regex_backing)
+
         if verdict == "FALSE_POSITIVE":
-            gate_action = "DISCARD"
+            if is_regex_backed and severity in ("CRITICAL", "HIGH"):
+                log.info(
+                    f"[{state['scan_id']}] Overriding FALSE_POSITIVE for regex-backed "
+                    f"{severity} finding: {finding.get('type')} at line {finding.get('line')}"
+                )
+                gate_action = "BLOCK"
+                has_block = True
+            elif is_regex_backed and severity == "MEDIUM":
+                gate_action = "WARN"
+                has_warn = True
+            # ── Fix #3: Confidence floor — rescue high-confidence LLM findings ──
+            # Many vulnerability classes (missing auth, weak hashing, path traversal,
+            # open redirect, rate limiting, enumeration) have no regex pattern.
+            # Without this, they vanish whenever critique second-guesses itself.
+            elif finding.get("initial_confidence", 0) >= 0.90 and severity in ("CRITICAL", "HIGH"):
+                gate_action = "WARN"   # downgrade from BLOCK, but don't DISCARD
+                has_warn = True
+                log.info(
+                    f"[{state['scan_id']}] Confidence floor rescued FALSE_POSITIVE: "
+                    f"{finding.get('type')} at line {finding.get('line')} "
+                    f"(initial_confidence={finding.get('initial_confidence', 0):.2f}, severity={severity})"
+                )
+            else:
+                gate_action = "DISCARD"
         elif confidence >= BLOCK_THRESHOLD and severity in ("CRITICAL", "HIGH"):
             gate_action = "BLOCK"
             has_block = True
         elif confidence >= WARN_THRESHOLD:
             gate_action = "WARN"
             has_warn = True
+        elif is_regex_backed:
+            if severity in ("CRITICAL", "HIGH"):
+                gate_action = "BLOCK"
+                has_block = True
+            else:
+                gate_action = "WARN"
+                has_warn = True
+            log.info(
+                f"[{state['scan_id']}] Confidence floor applied for regex-backed "
+                f"{severity} finding: {finding.get('type')} at line {finding.get('line')} "
+                f"(confidence={confidence:.2f})"
+            )
         else:
             gate_action = "DISCARD"
 
         final_findings.append({**finding, "gate_action": gate_action})
 
-    # Overall decision
+    # ── SAFETY NET: Inject any prefilter hits missing from final output ──────
+    # The regex prefilter is deterministic and reliable. If a prefilter hit
+    # has no corresponding finding in the output (because the LLM missed it,
+    # the merge failed, or the critique dismissed it), inject it directly.
+    if prefilter_hits:
+        injected = _inject_missing_prefilter_hits(
+            final_findings, prefilter_hits, state["scan_id"]
+        )
+        if injected:
+            final_findings.extend(injected)
+            for f in injected:
+                if f["gate_action"] == "BLOCK":
+                    has_block = True
+                elif f["gate_action"] == "WARN":
+                    has_warn = True
+
     if has_block:
         gate_decision = "BLOCK"
     elif has_warn:
@@ -394,7 +577,8 @@ def gate_decision_node(state: dict) -> dict:
 
     log.info(
         f"[{state['scan_id']}] Gate decision: {gate_decision} | "
-        f"block={blocked} warn={warned} discard={discarded}"
+        f"block={blocked} warn={warned} discard={discarded} "
+        f"total={len(final_findings)}"
     )
 
     return {
@@ -403,77 +587,307 @@ def gate_decision_node(state: dict) -> dict:
     }
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
+# ── Gate Decision Helpers ────────────────────────────────────────────────────
 
-def _merge_cve_into_findings(llm_findings: list, cve_findings: list) -> list:
-    """
-    Merges confirmed OSV CVE findings into the LLM findings list.
-    Deduplicates by checking if the LLM already mentioned the same
-    dependency (by artifact name or pom.xml line number).
-    CVE findings have 0.98 confidence — they are database facts, not guesses.
-    """
-    merged = list(llm_findings)
+SECRET_TYPES = {"SECRET_EXPOSURE", "HARDCODED_API_KEY", "HARDCODED_PASSWORD",
+                "HARDCODED_SECRET", "AWS_ACCESS_KEY", "AWS_SECRET_KEY",
+                "API_KEY_PATTERN", "PRIVATE_KEY", "DB_CREDENTIALS",
+                "DB_CREDENTIALS_IN_URL", "GITHUB_TOKEN", "HARDCODED_JWT",
+                "HARDCODED_ENCRYPTION_KEY"}
 
-    # Build set of already-covered pom.xml lines and artifact names
-    existing_lines = {f.get("line", -1) for f in llm_findings if f.get("file") == "pom.xml"}
-    existing_evidence_lower = {
-        f.get("evidence", "").lower() for f in llm_findings
+
+def _type_category(finding_type: str) -> str:
+    """Groups finding types into broad categories for coverage deduplication.
+    All secret types share one category; everything else is its own."""
+    if finding_type in SECRET_TYPES:
+        return "_SECRET_"
+    return finding_type
+
+
+def _build_regex_backing(prefilter_hits: list) -> list:
+    """Builds a list of (file, type, line) from regex prefilter hits."""
+    return [
+        (h.get("file", "unknown"), h["type"], h.get("diff_line", 0))
+        for h in prefilter_hits
+    ]
+
+
+def _is_regex_backed(finding: dict, regex_backing: list) -> bool:
+    """Checks if a finding matches any regex prefilter hit.
+
+    A finding is 'regex-backed' if there is a prefilter hit in the same file,
+    with a related type, and within 5 lines.
+    """
+    f_file = finding.get("file", "")
+    f_type = finding.get("type", "")
+    f_line = finding.get("line", 0)
+
+    for r_file, r_type, r_line in regex_backing:
+        if r_file != f_file:
+            continue
+        # Type must match directly or both be secret-related
+        if r_type != f_type and not (r_type in SECRET_TYPES and f_type in SECRET_TYPES):
+            continue
+        # Line proximity: within 5 lines
+        if abs(f_line - r_line) <= 5:
+            return True
+
+    return False
+
+
+def _inject_missing_prefilter_hits(
+    final_findings: list, prefilter_hits: list, scan_id: str
+) -> list:
+    """Safety net: injects prefilter hits that have no matching finding in the output.
+
+    This guarantees that every regex-detected vulnerability appears in the final
+    report, regardless of what the LLM analyzer, merge logic, or critique did.
+    """
+    severity_confidence = {
+        "CRITICAL": 0.95,
+        "HIGH": 0.90,
+        "MEDIUM": 0.75,
+        "LOW": 0.55,
     }
 
-    for cve in cve_findings:
-        cve_line = cve.get("line", -1)
-        artifact = cve.get("cve_id", "").lower()
+    # Build set of (file, type_category, line) already represented in output.
+    # TYPE-AWARE: a SECRET at line 14 does NOT suppress SQL_INJECTION at line 15.
+    # EXACT MATCH: Fix #1 (_correct_llm_lines) already aligns LLM findings to
+    # precise regex hit lines, so fuzzy proximity isn't needed here.
+    covered = set()
+    for f in final_findings:
+        if f.get("gate_action") != "DISCARD":
+            f_file = f.get("file", "")
+            f_line = f.get("line", 0)
+            f_cat = _type_category(f.get("type", ""))
+            covered.add((f_file, f_cat, f_line))
 
-        already_covered = (
-            cve_line in existing_lines or
-            any(artifact in ev for ev in existing_evidence_lower if ev)
+    injected = []
+    for i, hit in enumerate(prefilter_hits):
+        hit_file = hit.get("file", "unknown")
+        hit_line = hit.get("diff_line", 0)
+        hit_type = hit["type"]
+        hit_severity = hit["severity"]
+
+        if (hit_file, _type_category(hit_type), hit_line) in covered:
+            continue
+
+        # This regex hit has NO corresponding finding in the output — inject it
+        confidence = severity_confidence.get(hit_severity, 0.75)
+
+        if hit_severity in ("CRITICAL", "HIGH"):
+            gate_action = "BLOCK"
+        else:
+            gate_action = "WARN"
+
+        injected.append({
+            "finding_id": f"safety_{i:03d}",
+            "severity": hit_severity,
+            "type": hit_type,
+            "file": hit_file,
+            "line": hit_line,
+            "evidence": hit["line_content"][:200],
+            "confidence": confidence,
+            "final_confidence": confidence,
+            "source": hit.get("source", "regex_prefilter"),
+            "critique_verdict": "CONFIRMED",
+            "critique_rationale": "Regex pattern match — deterministic detection.",
+            "initial_confidence": confidence,
+            "gate_action": gate_action,
+            "policy_ref": "SEC-001",
+            "remediation": _remediation_for_type(hit_type),
+        })
+
+        log.info(
+            f"[{scan_id}] Safety net injected: {hit_type} ({hit_severity}) "
+            f"at {hit_file}:{hit_line} -> {gate_action}"
         )
 
+    if injected:
+        log.info(
+            f"[{scan_id}] Safety net total: {len(injected)} prefilter hits "
+            f"were missing from pipeline output and have been injected"
+        )
+
+    return injected
+
+
+def _remediation_for_type(finding_type: str) -> str:
+    """Returns a type-specific remediation message."""
+    remediation_map = {
+        "HARDCODED_API_KEY": "Move to environment variables or a secrets manager.",
+        "HARDCODED_PASSWORD": "Move to environment variables or a secrets manager.",
+        "HARDCODED_SECRET": "Move to environment variables or a secrets manager.",
+        "DB_CREDENTIALS_IN_URL": "Move credentials to environment variables. Use connection pooling with injected config.",
+        "SQL_INJECTION": "Use parameterized queries or prepared statements instead of string concatenation.",
+        "COMMAND_INJECTION": "Use a safe API (e.g. execFile with argument array) instead of shell string concatenation.",
+        "BROKEN_AUTH": "Use jwt.verify() instead of jwt.decode() to validate token signatures.",
+        "EVAL_INJECTION": "Avoid eval()/exec() with dynamic input. Use safe alternatives.",
+        "PCI_DATA_IN_LOGS": "Never log card numbers, CVVs, or PANs. Mask sensitive data before logging.",
+        "CORS_WILDCARD": "Restrict Access-Control-Allow-Origin to specific trusted domains.",
+        "INSECURE_RANDOM": "Use crypto.randomBytes() or crypto.randomUUID() instead of Math.random() for security tokens.",
+        "XSS_RISK": "Escape user input before rendering in HTML. Use a template engine with auto-escaping.",
+        "INSECURE_DESERIALIZE": "Use safe deserialization methods (e.g. yaml.safe_load, JSON instead of pickle).",
+        # Fix #4: remediation for new pattern types
+        "HARDCODED_ENCRYPTION_KEY": "Move encryption keys to a secrets manager or KMS.",
+        "WEAK_HASHING": "Use SHA-256 or stronger. MD5 and SHA-1 are cryptographically broken.",
+        "PATH_TRAVERSAL": "Validate and sanitize file paths. Use path.resolve() and verify the resolved path is within an allowed directory.",
+        "OPEN_REDIRECT": "Validate redirect URLs against a whitelist of allowed destinations.",
+    }
+    return remediation_map.get(finding_type, "Review and remediate this security finding.")
+
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+def _correct_llm_lines(llm_findings: list, prefilter_hits: list) -> list:
+    """Corrects LLM-generated line numbers using precise regex prefilter data.
+
+    The regex scanner computes line numbers from @@ hunk headers (always correct),
+    while the LLM often guesses wrong.  When both find the same type in the same
+    file, we overwrite the LLM's line number with the regex value.
+    """
+    # Build regex lookup: (file, type) -> list of line numbers
+    regex_by_file = {}
+    for hit in prefilter_hits:
+        key = hit.get("file", "unknown")
+        regex_by_file.setdefault(key, []).append(hit)
+
+    corrected = []
+    used_hit_ids = set()  # Fix #1: each regex hit backs at most one LLM finding
+
+    for finding in llm_findings:
+        f = dict(finding)
+        f_file = f.get("file", "")
+        f_type = f.get("type", "")
+        f_line = f.get("line", 0)
+
+        hits_in_file = regex_by_file.get(f_file, [])
+        best_match = None
+        best_distance = float("inf")
+
+        for hit in hits_in_file:
+            if id(hit) in used_hit_ids:  # Fix #1: skip already-claimed hits
+                continue
+            h_type = hit["type"]
+            h_line = hit.get("diff_line", 0)
+
+            # Type must match (or both be secret types)
+            type_match = (h_type == f_type or
+                         (h_type in SECRET_TYPES and f_type in SECRET_TYPES))
+            if not type_match:
+                continue
+
+            distance = abs(f_line - h_line)
+            if distance < best_distance:
+                best_distance = distance
+                best_match = hit
+
+        if best_match:
+            used_hit_ids.add(id(best_match))  # Fix #1: always claim, even if distance==0
+            # Upgrade generic SECRET_EXPOSURE from LLM to specific regex secret type
+            if f_type == "SECRET_EXPOSURE" and best_match["type"] in SECRET_TYPES:
+                f["type"] = best_match["type"]
+            if best_distance > 0:
+                old_line = f_line
+                f["line"] = best_match["diff_line"]
+                log.debug(
+                    f"Corrected LLM line {old_line} -> {f['line']} for "
+                    f"{f_type} in {f_file}"
+                )
+
+        corrected.append(f)
+
+    return corrected
+
+
+def _merge_cve_into_findings(llm_findings: list, cve_findings: list) -> list:
+    """Merges confirmed OSV CVE findings into LLM findings, deduplicated."""
+    merged = list(llm_findings)
+
+    existing_evidence_lower = {f.get("evidence", "").lower() for f in llm_findings}
+
+    for cve in cve_findings:
+        artifact = cve.get("cve_id", "").lower()
+        already_covered = any(artifact in ev for ev in existing_evidence_lower if ev)
         if not already_covered:
-            log.info(f"Injecting CVE finding: {cve['cve_id']} CVSS={cve.get('cvss_score', '?')}")
+            log.info(f"Injecting CVE finding: {cve.get('cve_id')} CVSS={cve.get('cvss_score', '?')}")
             merged.append(cve)
 
     return merged
 
 
 def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list:
-    """
-    Merges regex prefilter hits into LLM findings.
-    Only adds hits that aren't already represented in LLM findings
-    (matched by line number or evidence content similarity).
-    Ensures we never lose a confirmed regex detection due to LLM under-reporting.
+    """Merges regex prefilter hits not already captured by the LLM.
+
+    Deduplication requires BOTH:
+      - Same finding type (or closely related type), AND
+      - Line proximity (within 3 lines) OR substantial evidence overlap
+    This prevents a broad LLM evidence string from accidentally swallowing
+    unrelated regex hits.
     """
     merged = list(llm_findings)
 
-    # Build a set of evidence strings already in LLM findings (lowercased for fuzzy match)
-    existing_evidence = {
-        f.get("evidence", "").lower()[:80]
-        for f in llm_findings
+    severity_confidence = {
+        "CRITICAL": 0.93,
+        "HIGH": 0.88,
+        "MEDIUM": 0.70,
+        "LOW": 0.50,
     }
-    existing_lines = {f.get("line", -1) for f in llm_findings}
+
+    # Build a lookup of LLM findings by (file, type) for precise matching
+    llm_by_file_type = {}
+    for f in llm_findings:
+        key = (f.get("file", ""), f.get("type", ""))
+        llm_by_file_type.setdefault(key, []).append(f)
+
+
+    def types_related(t1: str, t2: str) -> bool:
+        if t1 == t2:
+            return True
+        return t1 in SECRET_TYPES and t2 in SECRET_TYPES
 
     for i, hit in enumerate(prefilter_hits):
         line_content_lower = hit["line_content"].lower()[:80]
         diff_line = hit.get("diff_line", 0)
+        hit_type = hit["type"]
+        hit_file = hit.get("file", "unknown")
 
-        # Skip if already captured by LLM (same line or very similar evidence)
-        already_covered = (
-            diff_line in existing_lines or
-            any(line_content_lower in ev or ev in line_content_lower
-                for ev in existing_evidence if len(ev) > 10)
-        )
+        already_covered = False
+        for f in llm_findings:
+            f_type = f.get("type", "")
+            f_line = f.get("line", -1)
+            f_file = f.get("file", "")
+
+            # Must be the same file and a related finding type
+            if f_file != hit_file or not types_related(hit_type, f_type):
+                continue
+
+            # Line proximity: exact match for secrets (they cluster on adjacent
+            # lines and ±3 swallows genuinely different findings), ±3 for others.
+            max_dist = 0 if (hit_type in SECRET_TYPES and f_type in SECRET_TYPES) else 3
+            if abs(diff_line - f_line) <= max_dist:
+                already_covered = True
+                break
+
+            # Evidence overlap: substantial content match
+            f_evidence = f.get("evidence", "").lower()[:80]
+            if len(f_evidence) > 10 and len(line_content_lower) > 10:
+                if line_content_lower in f_evidence or f_evidence in line_content_lower:
+                    already_covered = True
+                    break
 
         if not already_covered:
             merged.append({
                 "finding_id": f"regex_{i:03d}",
                 "severity": hit["severity"],
                 "type": hit["type"],
-                "file": "unknown",
+                "file": hit_file,
                 "line": diff_line,
                 "evidence": hit["line_content"][:200],
-                "confidence": 0.88,   # High confidence — regex pattern confirmed
+                "confidence": severity_confidence.get(hit["severity"], 0.75),
+                "source": hit.get("source", "regex_prefilter"),
                 "policy_ref": "SEC-001",
-                "remediation": "Move to environment variables or a secrets manager (e.g. AWS Secrets Manager, Vault)."
+                "remediation": "Move to environment variables or a secrets manager."
             })
 
     return merged
@@ -481,21 +895,29 @@ def _merge_regex_into_findings(llm_findings: list, prefilter_hits: list) -> list
 
 def _prefilter_to_findings(hits: list) -> list:
     """Convert regex prefilter hits to finding format as fallback."""
+    severity_confidence = {
+        "CRITICAL": 0.92,
+        "HIGH": 0.80,
+        "MEDIUM": 0.65,
+        "LOW": 0.50,
+    }
     findings = []
     for i, hit in enumerate(hits):
+        severity = hit["severity"]
         findings.append({
             "finding_id": f"regex_{i:03d}",
-            "severity": hit["severity"],
+            "severity": severity,
             "type": hit["type"],
-            "file": "unknown",
-            "line": 0,
+            "file": hit.get("file", "unknown"),
+            "line": hit.get("diff_line", 0),
             "evidence": hit["line_content"][:200],
-            "confidence": 0.75,
+            "confidence": severity_confidence.get(severity, 0.75),
+            "source": hit.get("source", "regex_prefilter"),
             "policy_ref": "SEC-001",
             "remediation": "Move to environment variables or secrets manager."
         })
     return findings
 
 
-# Alias — keeps backward compatibility if graph.py uses old name
+# Alias — backward compatibility with older graph.py versions
 dependency_scanner_node = cve_scanner_node
